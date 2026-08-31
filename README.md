@@ -65,6 +65,13 @@ dotnet publish -c Release
 На выходе — один самодостаточный `MurloVille.exe`, которому не нужен
 установленный .NET.
 
+## Подпись кода
+
+Выпуски подписываются бесплатно через [SignPath.io](https://signpath.io), сертификат
+предоставлен [SignPath Foundation](https://signpath.org).
+
+> Free code signing provided by SignPath.io, certificate by SignPath Foundation.
+
 ## Лицензия
 
 MIT, см. [LICENSE](LICENSE).
