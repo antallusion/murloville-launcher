@@ -104,6 +104,7 @@ public partial class MainWindow : Window
                        : "Укажи, куда ставить.");
             PlayBtn.Content = "УСТАНОВИТЬ";
             PlayBtn.IsEnabled = true;
+            FindBtn.Visibility = Visibility.Visible;
             return;
         }
 
@@ -341,6 +342,36 @@ public partial class MainWindow : Window
 
     // --- кнопка --------------------------------------------------------------
 
+    /// <summary>
+    /// «Найти игру» — для тех, у кого клиент уже стоит. Требуем Wow.exe в
+    /// указанной папке: иначе человек ткнёт в «Загрузки» и будет ждать, пока
+    /// туда приедет шестнадцать гигабайт.
+    /// </summary>
+    private async void Find_Click(object sender, RoutedEventArgs e)
+    {
+        var dlg = new Microsoft.Win32.OpenFolderDialog
+        {
+            Title = "Укажи папку с установленной игрой — ту, где лежит Wow.exe",
+        };
+        if (dlg.ShowDialog() != true) return;
+
+        if (!File.Exists(Path.Combine(dlg.FolderName, "Wow.exe")))
+        {
+            MessageBox.Show(
+                "В этой папке нет Wow.exe. Нужна папка с уже установленной игрой."
+                + Environment.NewLine + Environment.NewLine
+                + "Если игры нет — нажми «Установить», и я скачаю её сам.",
+                "MurloVille", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        _root = dlg.FolderName;
+        RememberRoot(_root);
+        FindBtn.Visibility = Visibility.Collapsed;
+        PlayBtn.Content = "ИГРАТЬ";
+        await Sync();
+    }
+
     private async void Play_Click(object sender, RoutedEventArgs e)
     {
         if (_root is null)
@@ -364,6 +395,7 @@ public partial class MainWindow : Window
 
             _root = target;
             RememberRoot(_root);
+            FindBtn.Visibility = Visibility.Collapsed;
             await Sync();
             return;
         }

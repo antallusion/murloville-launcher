@@ -95,10 +95,19 @@
                                Margin="0,8,0,0" TextTrimming="CharacterEllipsis"/>
                 </StackPanel>
 
-                <Button Grid.Column="1" x:Name="PlayBtn" Content="ИГРАТЬ"
-                        Style="{StaticResource GoldButton}"
-                        Width="210" Height="58" IsEnabled="False"
-                        Click="Play_Click"/>
+                <StackPanel Grid.Column="1" Orientation="Horizontal"
+                            VerticalAlignment="Center">
+                    <!-- Показывается только когда игра не найдена: у кого клиент
+                         уже есть, тому качать шестнадцать гигабайт незачем. -->
+                    <Button x:Name="FindBtn" Content="НАЙТИ ИГРУ"
+                            Style="{StaticResource GhostButton}"
+                            Width="180" Height="58" Margin="0,0,12,0"
+                            Visibility="Collapsed" Click="Find_Click"/>
+                    <Button x:Name="PlayBtn" Content="ИГРАТЬ"
+                            Style="{StaticResource GoldButton}"
+                            Width="210" Height="58" IsEnabled="False"
+                            Click="Play_Click"/>
+                </StackPanel>
             </Grid>
         </Grid>
     </Grid>

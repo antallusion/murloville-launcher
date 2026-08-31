@@ -39,6 +39,32 @@
             </Setter>
         </Style>
 
+        <!-- Второстепенная кнопка: та же форма, но контуром. Рядом с золотой
+             она не спорит за внимание, а спокойно предлагает второй путь. -->
+        <Style x:Key="GhostButton" TargetType="Button">
+            <Setter Property="Foreground" Value="{StaticResource Text}"/>
+            <Setter Property="FontSize" Value="15"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="bd" CornerRadius="4" Background="#22FFFFFF"
+                                BorderBrush="#55E6C36A" BorderThickness="1">
+                            <ContentPresenter HorizontalAlignment="Center"
+                                              VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="bd" Property="Background" Value="#33FFFFFF"/>
+                                <Setter TargetName="bd" Property="BorderBrush" Value="#99E6C36A"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
         <!-- Полоска загрузки: тонкая, золотая, без объёма. -->
         <Style x:Key="ThinBar" TargetType="ProgressBar">
             <Setter Property="Height" Value="6"/>
