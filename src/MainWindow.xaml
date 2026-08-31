@@ -1,0 +1,105 @@
+<Window x:Class="MurloLauncher.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="MurloVille" Height="560" Width="900"
+        WindowStartupLocation="CenterScreen"
+        ResizeMode="CanMinimize"
+        WindowStyle="None" AllowsTransparency="False"
+        Background="{StaticResource Ink}"
+        MouseLeftButtonDown="Window_Drag">
+
+    <Grid>
+        <!-- Подложка приезжает с сервера при запуске, внутри программы её нет.
+             Затемняем градиентом, иначе текст по картинке не читается: она
+             яркая в середине. Если сервер недоступен, окно останется просто
+             тёмным и это не мешает ничему. -->
+        <Image x:Name="BgImage" Stretch="UniformToFill"/>
+        <Rectangle>
+            <Rectangle.Fill>
+                <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+                    <GradientStop Color="#EE07090F" Offset="0.0"/>
+                    <GradientStop Color="#B807090F" Offset="0.45"/>
+                    <GradientStop Color="#5507090F" Offset="1.0"/>
+                </LinearGradientBrush>
+            </Rectangle.Fill>
+        </Rectangle>
+        <Rectangle Height="120" VerticalAlignment="Bottom">
+            <Rectangle.Fill>
+                <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+                    <GradientStop Color="#0007090F" Offset="0"/>
+                    <GradientStop Color="#F207090F" Offset="1"/>
+                </LinearGradientBrush>
+            </Rectangle.Fill>
+        </Rectangle>
+
+        <!-- Золотая нить сверху, как на сайте. -->
+        <Rectangle Height="3" VerticalAlignment="Top">
+            <Rectangle.Fill>
+                <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+                    <GradientStop Color="#0000000" Offset="0"/>
+                    <GradientStop Color="#E6C36A" Offset="0.5"/>
+                    <GradientStop Color="#0000000" Offset="1"/>
+                </LinearGradientBrush>
+            </Rectangle.Fill>
+        </Rectangle>
+
+        <!-- Крестик закрытия. -->
+        <Button x:Name="CloseBtn" Content="✕" Click="Close_Click"
+                HorizontalAlignment="Right" VerticalAlignment="Top"
+                Margin="0,10,14,0" Width="28" Height="28"
+                Foreground="#8E8A82" FontSize="14" Cursor="Hand"
+                Background="Transparent" BorderThickness="0"/>
+
+        <Grid Margin="46,40,46,34">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <!-- Шапка -->
+            <StackPanel Grid.Row="0" Orientation="Horizontal">
+                <Image x:Name="MarkImage" Width="76" Height="62" VerticalAlignment="Center"/>
+                <StackPanel Margin="16,0,0,0" VerticalAlignment="Center">
+                    <TextBlock Text="MURLOVILLE" FontSize="30" FontWeight="Bold"
+                               Foreground="{StaticResource Gold}"/>
+                    <TextBlock Text="Wrath of the Lich King · 3.3.5a · боты-компаньоны"
+                               FontSize="13" Foreground="{StaticResource TextMuted}"
+                               Margin="2,2,0,0"/>
+                </StackPanel>
+            </StackPanel>
+
+            <!-- Середина: состояние сервера -->
+            <StackPanel Grid.Row="1" VerticalAlignment="Center" Width="420"
+                        HorizontalAlignment="Left">
+                <TextBlock x:Name="OnlineText" Text=""
+                           FontSize="15" Foreground="{StaticResource Text}"
+                           TextWrapping="Wrap"/>
+            </StackPanel>
+
+            <!-- Низ: состояние, полоска, кнопка -->
+            <Grid Grid.Row="2">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <StackPanel Grid.Column="0" VerticalAlignment="Center" Margin="0,0,28,0">
+                    <TextBlock x:Name="StatusText" Text="Проверяю обновления…"
+                               FontSize="14" Foreground="{StaticResource Text}"
+                               Margin="0,0,0,10"/>
+                    <ProgressBar x:Name="Bar" Style="{StaticResource ThinBar}"
+                                 Minimum="0" Maximum="100" Value="0"/>
+                    <TextBlock x:Name="DetailText" Text=""
+                               FontSize="11" Foreground="{StaticResource TextMuted}"
+                               Margin="0,8,0,0" TextTrimming="CharacterEllipsis"/>
+                </StackPanel>
+
+                <Button Grid.Column="1" x:Name="PlayBtn" Content="ИГРАТЬ"
+                        Style="{StaticResource GoldButton}"
+                        Width="210" Height="58" IsEnabled="False"
+                        Click="Play_Click"/>
+            </Grid>
+        </Grid>
+    </Grid>
+</Window>

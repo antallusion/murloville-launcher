@@ -1,0 +1,64 @@
+<Application x:Class="MurloLauncher.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             StartupUri="MainWindow.xaml">
+    <Application.Resources>
+
+        <!-- Цвета сайта: тёмный камень и золото. -->
+        <SolidColorBrush x:Key="Gold"      Color="#E6C36A"/>
+        <SolidColorBrush x:Key="GoldDim"   Color="#C8A45A"/>
+        <SolidColorBrush x:Key="Ink"       Color="#07090F"/>
+        <SolidColorBrush x:Key="Text"      Color="#EFE7D6"/>
+        <SolidColorBrush x:Key="TextMuted" Color="#8E8A82"/>
+
+        <!-- Крупная кнопка «Играть». Плоская, золотая, с потемнением по
+             наведению — как на сайте. -->
+        <Style x:Key="GoldButton" TargetType="Button">
+            <Setter Property="Foreground" Value="#1A1408"/>
+            <Setter Property="FontSize" Value="19"/>
+            <Setter Property="FontWeight" Value="Bold"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="bd" CornerRadius="4" Background="{StaticResource Gold}">
+                            <ContentPresenter HorizontalAlignment="Center"
+                                              VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="bd" Property="Background" Value="#F2D488"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="bd" Property="Background" Value="#4A4335"/>
+                                <Setter Property="Foreground" Value="#8E8A82"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Полоска загрузки: тонкая, золотая, без объёма. -->
+        <Style x:Key="ThinBar" TargetType="ProgressBar">
+            <Setter Property="Height" Value="6"/>
+            <Setter Property="Foreground" Value="{StaticResource Gold}"/>
+            <Setter Property="Background" Value="#22FFFFFF"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ProgressBar">
+                        <Grid>
+                            <Border CornerRadius="3" Background="{TemplateBinding Background}"/>
+                            <Border x:Name="PART_Track"/>
+                            <Border x:Name="PART_Indicator" CornerRadius="3"
+                                    HorizontalAlignment="Left"
+                                    Background="{TemplateBinding Foreground}"/>
+                        </Grid>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+    </Application.Resources>
+</Application>

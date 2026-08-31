@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <AssemblyName>MurloVille</AssemblyName>
+    <RootNamespace>MurloLauncher</RootNamespace>
+
+    <!-- Самодостаточный один файл: игроку не нужно ставить .NET.
+         Весит больше, зато запускается у всех без вопросов. -->
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <SatelliteResourceLanguages>ru</SatelliteResourceLanguages>
+
+    <Version>1.0.0</Version>
+    <Product>MurloVille</Product>
+    <Company>MurloVille</Company>
+    <AssemblyTitle>Лаунчер MurloVille</AssemblyTitle>
+  </PropertyGroup>
+
+  <!-- Картинок внутри нет намеренно: оформление подгружается с сервера при
+       запуске. Исходники открыты, а класть в открытый репозиторий чужую
+       графику нельзя. Побочная выгода — вид меняется без пересборки. -->
+
+</Project>
