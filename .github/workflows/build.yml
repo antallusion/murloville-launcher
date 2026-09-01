@@ -1,8 +1,10 @@
-# Сборка лаунчера.
+# Сборка лаунчера и установщика.
 #
 # Собираем на GitHub Actions не ради удобства, а потому что этого требует
 # бесплатная подпись от SignPath Foundation: они подписывают только то, что
 # заведомо собрано из открытых исходников этого репозитория.
+#
+# Inno Setup на образах windows-latest уже стоит, ставить его не нужно.
 
 name: build
 
@@ -23,13 +25,37 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
-      - name: Сборка
+      - name: Версия из проекта
+        id: ver
+        shell: pwsh
+        run: |
+          $m = Select-String -Path src/MurloLauncher.csproj -Pattern '<Version>(.*?)</Version>'
+          $v = $m.Matches[0].Groups[1].Value
+          Write-Output "версия: $v"
+          "version=$v" >> $env:GITHUB_OUTPUT
+
+      - name: Сборка лаунчера
         working-directory: src
         run: dotnet publish -c Release -o ../out
 
-      - name: Выложить артефакт
+      - name: Сборка установщика
+        shell: pwsh
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
+            /DAppVersion=${{ steps.ver.outputs.version }} `
+            installer\MurloVille.iss
+          if ($LASTEXITCODE -ne 0) { throw "установщик не собрался" }
+
+      - name: Выложить лаунчер
         uses: actions/upload-artifact@v4
         with:
           name: MurloVille-launcher
           path: out/MurloVille.exe
+          if-no-files-found: error
+
+      - name: Выложить установщик
+        uses: actions/upload-artifact@v4
+        with:
+          name: MurloVille-setup
+          path: dist/MurloVille-Setup-*.exe
           if-no-files-found: error
