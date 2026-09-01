@@ -10,8 +10,12 @@
 
 | Файл | Кому |
 |---|---|
-| `MurloVille-Setup-<версия>.exe` | обычный установщик с мастером — то, что нужно почти всем |
+| `MurloVille-Setup.exe` | обычный установщик с мастером — то, что нужно почти всем |
+| `MurloVille-Setup.zip` | тот же установщик архивом, если браузер блокирует скачивание exe |
 | `MurloVille.exe` | сам лаунчер отдельным файлом, если ставить ничего не хочется |
+
+Ссылки без версии всегда ведут на свежий выпуск:
+`releases/latest/download/MurloVille-Setup.exe`.
 
 Оба лежат в [релизах](https://github.com/antallusion/murloville-launcher/releases)
 и на [play.murloville.ru/download](https://play.murloville.ru/download).
