@@ -54,8 +54,40 @@ jobs:
           if-no-files-found: error
 
       - name: Выложить установщик
+        id: setup
         uses: actions/upload-artifact@v4
         with:
           name: MurloVille-setup
           path: dist/MurloVille-Setup-*.exe
+          if-no-files-found: error
+
+      # Подпись включится сама, как только в настройках репозитория появятся
+      # секреты SignPath. Пока их нет, шаг пропускается и сборка остаётся
+      # зелёной: держим его здесь, чтобы в день получения сертификата работа
+      # свелась к добавлению двух секретов.
+      #
+      # Порядок важен: SignPath берёт уже выложенный артефакт по его номеру,
+      # поэтому шаг обязан идти после выкладки, а не до.
+      - name: Подпись установщика
+        if: env.SIGNPATH_TOKEN != ''
+        env:
+          SIGNPATH_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+        uses: signpath/github-action-submit-signing-request@v1
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ secrets.SIGNPATH_ORG_ID }}
+          project-slug: murloville-launcher
+          signing-policy-slug: release-signing
+          github-artifact-id: ${{ steps.setup.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed
+
+      - name: Выложить подписанный установщик
+        if: env.SIGNPATH_TOKEN != ''
+        env:
+          SIGNPATH_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: MurloVille-setup-signed
+          path: signed/*.exe
           if-no-files-found: error
