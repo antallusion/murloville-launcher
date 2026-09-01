@@ -7,6 +7,7 @@ using System.Net.Http;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Input;
@@ -44,8 +45,13 @@ public partial class MainWindow : Window
         Timeout = System.Threading.Timeout.InfiniteTimeSpan,
     };
 
+    /// <summary>Что произойдёт по нажатию главной кнопки.</summary>
+    private enum Mode { Play, Install, Retry }
+
     private string? _root;
     private Manifest? _manifest;
+    private Mode _mode = Mode.Play;
+    private bool _busy;
 
     public MainWindow()
     {
@@ -102,6 +108,7 @@ public partial class MainWindow : Window
             Say("Игра не найдена — нужна установка.",
                 gb > 0 ? $"Скачать предстоит {gb:0.#} ГБ. Место можно выбрать любое."
                        : "Укажи, куда ставить.");
+            _mode = Mode.Install;
             PlayBtn.Content = "УСТАНОВИТЬ";
             PlayBtn.IsEnabled = true;
             FindBtn.Visibility = Visibility.Visible;
@@ -112,6 +119,7 @@ public partial class MainWindow : Window
         {
             Say("Сервер обновлений не отвечает — играть можно.", "Клиент на месте.");
             Bar.Value = 100;
+            _mode = Mode.Play;
             PlayBtn.IsEnabled = true;
             return;
         }
@@ -144,6 +152,17 @@ public partial class MainWindow : Window
         try { File.WriteAllText(ConfigPath, root); } catch { }
     }
 
+    /// <summary>
+    /// Запущена ли игра. Пока Wow.exe работает, он держит MPQ открытыми, и
+    /// заменить их нельзя — Windows отвечает отказом в доступе, из-за чего
+    /// обновление выглядит как поломка лаунчера.
+    /// </summary>
+    private static bool GameRunning()
+    {
+        try { return Process.GetProcessesByName("Wow").Length > 0; }
+        catch { return false; }
+    }
+
     // --- установка и обновление одной дорогой --------------------------------
 
     /// <summary>
@@ -152,82 +171,227 @@ public partial class MainWindow : Window
     /// </summary>
     private async Task Sync()
     {
-        if (_manifest?.files is null || _root is null) return;
+        if (_manifest?.files is null || _root is null || _busy) return;
 
+        _busy = true;
         PlayBtn.IsEnabled = false;
-
-        Say("Сверяю файлы…");
-        var todo = new List<Entry>();
-        long todoBytes = 0, haveBytes = 0;
-
-        for (var i = 0; i < _manifest.files.Count; i++)
+        FindBtn.IsEnabled = false;
+        try
         {
-            var f = _manifest.files[i];
-            Bar.Value = (double)i / _manifest.files.Count * 100;
-            DetailText.Text = f.path;
+            Say("Сверяю файлы…");
 
-            if (NeedsDownload(Local(f), f))
+            // Сверка читает файлы и считает хеши, поэтому уходит с потока
+            // интерфейса целиком: на шестнадцати гигабайтах окно иначе
+            // замирает на минуты и выглядит зависшим.
+            var progress = new Progress<(int Done, int Total, string Path)>(p =>
             {
-                todo.Add(f);
-                todoBytes += f.size;
-            }
-            else
+                Bar.Value = (double)p.Done / p.Total * 100;
+                DetailText.Text = p.Path;
+            });
+
+            var plan = await Task.Run(() => Check(progress));
+
+            if (plan.Todo.Count == 0)
             {
-                haveBytes += f.size;
-            }
-            await Task.Yield();
-        }
-
-        if (todo.Count == 0)
-        {
-            Say("Клиент обновлён.", "Всё на месте.");
-            Bar.Value = 100;
-            PlayBtn.Content = "ИГРАТЬ";
-            PlayBtn.IsEnabled = true;
-            return;
-        }
-
-        // Место проверяем до начала, а не на двенадцатом гигабайте.
-        if (!EnoughSpace(todoBytes, out var freeGb))
-        {
-            Say("Не хватает места на диске.",
-                $"Нужно {Gb(todoBytes)}, свободно {freeGb:0.#} ГБ.");
-            Bar.Value = 0;
-            return;
-        }
-
-        var big = todoBytes > 1073741824;   // больше гигабайта — это установка
-        Say(big ? $"Устанавливаю игру: {Gb(todoBytes)}" : $"Качаю обновление: {Gb(todoBytes)}",
-            big ? "Первый раз это долго. Можно свернуть окно." : null);
-        Bar.Value = 0;
-
-        long done = 0;
-        var started = DateTime.UtcNow;
-
-        foreach (var f in todo)
-        {
-            try
-            {
-                await Download(f, done, todoBytes, started);
-            }
-            catch (Exception ex)
-            {
-                Say("Загрузка прервалась. Запусти лаунчер снова — продолжит с этого места.",
-                    $"{f.path}: {Short(ex.Message)}");
+                Say("Клиент обновлён.", "Всё на месте.");
+                Bar.Value = 100;
+                _mode = Mode.Play;
+                PlayBtn.Content = "ИГРАТЬ";
+                PlayBtn.IsEnabled = true;
                 return;
             }
-            done += f.size;
-            Bar.Value = (double)done / todoBytes * 100;
-        }
 
-        Say(big ? "Игра установлена." : "Обновление установлено.",
-            $"Файлов: {todo.Count}, {Gb(todoBytes)}");
-        Bar.Value = 100;
-        PlayBtn.Content = "ИГРАТЬ";
+            // Игру надо закрыть до начала, а не узнавать об этом на первом же
+            // файле после получаса загрузки.
+            if (GameRunning())
+            {
+                OfferRetry("Игра запущена — обновить не смогу.",
+                    "Закрой World of Warcraft и нажми «Повторить». Пока игра работает, "
+                    + "она держит файлы клиента и заменить их нельзя.");
+                return;
+            }
+
+            // Место проверяем до начала, а не на двенадцатом гигабайте.
+            if (!EnoughSpace(plan.Bytes, out var freeGb))
+            {
+                Bar.Value = 0;
+                OfferRetry("Не хватает места на диске.",
+                    $"Нужно {Gb(plan.Bytes)}, свободно {freeGb:0.#} ГБ. Освободи место и нажми «Повторить».");
+                return;
+            }
+
+            var big = plan.Bytes > 1073741824;   // больше гигабайта — это установка
+            Say(big ? $"Устанавливаю игру: {Gb(plan.Bytes)}" : $"Качаю обновление: {Gb(plan.Bytes)}",
+                big ? "Первый раз это долго. Можно свернуть окно." : null);
+            Bar.Value = 0;
+
+            long done = 0;
+            var started = DateTime.UtcNow;
+            var failed = new List<string>();
+
+            foreach (var f in plan.Todo)
+            {
+                try
+                {
+                    await Download(f, done, plan.Bytes, started);
+                }
+                catch (Exception ex)
+                {
+                    // Один упавший файл не повод бросать остальные: чаще всего
+                    // это единственный занятый MPQ, а не общая беда.
+                    failed.Add($"{f.path}: {Short(ex.Message)}");
+                    if (GameRunning()) break;   // дальше будет ровно то же самое
+                }
+                done += f.size;
+                Bar.Value = (double)done / plan.Bytes * 100;
+            }
+
+            if (failed.Count > 0)
+            {
+                var tail = failed.Count > 1 ? $" (и ещё {failed.Count - 1})" : "";
+                if (GameRunning())
+                {
+                    OfferRetry("Игра запущена — обновление не доставить.",
+                        "Закрой World of Warcraft и нажми «Повторить».");
+                }
+                else
+                {
+                    OfferRetry("Часть файлов не обновилась.", failed[0] + tail);
+                }
+                return;
+            }
+
+            Say(big ? "Игра установлена." : "Обновление установлено.",
+                $"Файлов: {plan.Todo.Count}, {Gb(plan.Bytes)}");
+            Bar.Value = 100;
+            _mode = Mode.Play;
+            PlayBtn.Content = "ИГРАТЬ";
+            PlayBtn.IsEnabled = true;
+        }
+        finally
+        {
+            _busy = false;
+            FindBtn.IsEnabled = true;
+        }
+    }
+
+    private void OfferRetry(string status, string detail)
+    {
+        Say(status, detail);
+        _mode = Mode.Retry;
+        PlayBtn.Content = "ПОВТОРИТЬ";
         PlayBtn.IsEnabled = true;
     }
 
     private string Local(Entry f) => Path.Combine(_root!, f.path.Replace('/', '\\'));
+
+    // --- сверка --------------------------------------------------------------
+
+    private sealed record Plan(List<Entry> Todo, long Bytes);
+
+    /// <summary>
+    /// Считает, что надо докачать. Работает не в потоке интерфейса.
+    /// </summary>
+    private Plan Check(IProgress<(int, int, string)> progress)
+    {
+        var files = _manifest!.files!;
+        var verified = LoadVerified();
+        var fresh = new Dictionary<string, string>();
+
+        var todo = new List<Entry>();
+        long bytes = 0;
+
+        for (var i = 0; i < files.Count; i++)
+        {
+            var f = files[i];
+            progress.Report((i, files.Count, f.path));
+
+            var local = Local(f);
+            if (IsGood(local, f, verified, out var stamp))
+            {
+                fresh[f.path] = stamp;
+                // Хвост от прошлой прерванной загрузки этому файлу уже не нужен.
+                TryDelete(local + ".part");
+            }
+            else
+            {
+                todo.Add(f);
+                bytes += f.size;
+            }
+        }
+
+        SaveVerified(fresh);
+        return new Plan(todo, bytes);
+    }
+
+    /// <summary>
+    /// Файл на месте и совпадает с манифестом?
+    /// </summary>
+    private static bool IsGood(string local, Entry f, IReadOnlyDictionary<string, string> verified,
+                               out string stamp)
+    {
+        stamp = "";
+        var info = new FileInfo(local);
+        if (!info.Exists || info.Length != f.size) return false;
+
+        stamp = $"{info.Length}|{info.LastWriteTimeUtc.Ticks}|{f.sha256}";
+
+        if (string.IsNullOrEmpty(f.sha256)) return true;      // хеша нет — верим размеру
+
+        // Уже считали этот же файл в прошлый раз и с тех пор его не трогали.
+        if (verified.TryGetValue(f.path, out var known) && known == stamp) return true;
+
+        try
+        {
+            // Открываем с общим доступом: игра может держать MPQ открытым, но
+            // прочитать его при этом никто не мешает.
+            using var stream = new FileStream(local, FileMode.Open, FileAccess.Read,
+                                              FileShare.ReadWrite | FileShare.Delete);
+            var hash = Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
+            return hash.Equals(f.sha256, StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return false; }
+    }
+
+    /// <summary>
+    /// Помним, что уже проверяли. Пересчитывать SHA-256 по шестнадцати
+    /// гигабайтам при каждом запуске — это минуты работы диска ради ответа,
+    /// который почти всегда «всё на месте». Запись привязана к размеру и
+    /// времени изменения: тронули файл — посчитаем заново.
+    /// </summary>
+    private string VerifiedPath => Path.Combine(_root!, "murlo-launcher.cache");
+
+    private Dictionary<string, string> LoadVerified()
+    {
+        var map = new Dictionary<string, string>();
+        try
+        {
+            if (!File.Exists(VerifiedPath)) return map;
+            foreach (var line in File.ReadAllLines(VerifiedPath))
+            {
+                var cut = line.IndexOf('=');
+                if (cut > 0) map[line[..cut]] = line[(cut + 1)..];
+            }
+        }
+        catch { }
+        return map;
+    }
+
+    private void SaveVerified(Dictionary<string, string> map)
+    {
+        try
+        {
+            var sb = new StringBuilder();
+            foreach (var (k, v) in map) sb.Append(k).Append('=').AppendLine(v);
+            File.WriteAllText(VerifiedPath, sb.ToString());
+        }
+        catch { }
+    }
+
+    private static void TryDelete(string path)
+    {
+        try { if (File.Exists(path)) File.Delete(path); } catch { }
+    }
 
     private bool EnoughSpace(long need, out double freeGb)
     {
@@ -240,20 +404,7 @@ public partial class MainWindow : Window
         catch { freeGb = 0; return true; }   // не смогли узнать — не мешаем
     }
 
-    private static bool NeedsDownload(string local, Entry f)
-    {
-        var info = new FileInfo(local);
-        if (!info.Exists || info.Length != f.size) return true;
-        if (string.IsNullOrEmpty(f.sha256)) return false;   // хеша нет — верим размеру
-
-        try
-        {
-            using var stream = File.OpenRead(local);
-            var hash = Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
-            return !hash.Equals(f.sha256, StringComparison.OrdinalIgnoreCase);
-        }
-        catch { return true; }
-    }
+    // --- загрузка ------------------------------------------------------------
 
     /// <summary>Адрес файла. Для Диска ссылку приходится просить каждый раз: она временная.</summary>
     private async Task<string> ResolveUrl(Entry f)
@@ -337,10 +488,48 @@ public partial class MainWindow : Window
             }
         }
 
-        File.Move(part, local, overwrite: true);
+        ReplaceFile(part, local);
     }
 
-    // --- кнопка --------------------------------------------------------------
+    /// <summary>
+    /// Ставит скачанный файл на место старого.
+    ///
+    /// Это самое хрупкое место всей загрузки. Файл может быть помечен «только
+    /// чтение», его может секунду держать антивирус или проводник, а если
+    /// открыта игра — она держит MPQ намертво. Пробуем несколько раз и только
+    /// потом сдаёмся, объяснив причину по-человечески: «Access to the path is
+    /// denied» игроку ничего не говорит.
+    /// </summary>
+    private static void ReplaceFile(string part, string local)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                if (File.Exists(local))
+                {
+                    var attrs = File.GetAttributes(local);
+                    if (attrs.HasFlag(FileAttributes.ReadOnly))
+                        File.SetAttributes(local, attrs & ~FileAttributes.ReadOnly);
+                }
+
+                File.Move(part, local, overwrite: true);
+                return;
+            }
+            catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
+            {
+                if (attempt >= 4)
+                {
+                    throw new IOException(GameRunning()
+                        ? "файл занят игрой — закрой World of Warcraft"
+                        : "не удалось заменить файл, он чем-то занят", ex);
+                }
+                Thread.Sleep(400);
+            }
+        }
+    }
+
+    // --- кнопки --------------------------------------------------------------
 
     /// <summary>
     /// «Найти игру» — для тех, у кого клиент уже стоит. Требуем Wow.exe в
@@ -374,6 +563,13 @@ public partial class MainWindow : Window
 
     private async void Play_Click(object sender, RoutedEventArgs e)
     {
+        // «Повторить» после занятых файлов или нехватки места.
+        if (_mode == Mode.Retry)
+        {
+            await Sync();
+            return;
+        }
+
         if (_root is null)
         {
             var dlg = new Microsoft.Win32.OpenFolderDialog
