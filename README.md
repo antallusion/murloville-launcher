@@ -17,7 +17,7 @@
 Ссылки без версии всегда ведут на свежий выпуск:
 `releases/latest/download/MurloVille-Setup.exe`.
 
-Оба лежат в [релизах](https://github.com/antallusion/murloville-launcher/releases)
+Всё это лежит в [релизах](https://github.com/antallusion/murloville-launcher/releases)
 и на [play.murloville.ru/download](https://play.murloville.ru/download).
 
 ## Что умеет
