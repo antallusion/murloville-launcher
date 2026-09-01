@@ -48,14 +48,22 @@ public partial class MainWindow : Window
     /// <summary>Что произойдёт по нажатию главной кнопки.</summary>
     private enum Mode { Play, Install, Retry }
 
+    private readonly bool _autostart;
     private string? _root;
     private Manifest? _manifest;
     private Mode _mode = Mode.Play;
     private bool _busy;
+    private CancellationTokenSource? _scan;
 
-    public MainWindow()
+    public MainWindow(bool autostart = false)
     {
+        _autostart = autostart;
         InitializeComponent();
+
+        // При запуске вместе с Windows не лезем на глаза: догоняем обновления
+        // свёрнутыми, развернуть можно из панели задач.
+        if (autostart) WindowState = WindowState.Minimized;
+
         Loaded += async (_, _) => await Startup();
     }
 
@@ -88,6 +96,9 @@ public partial class MainWindow : Window
         _ = ShowOnline();
         _ = LoadArt();
 
+        AutoStartBox.IsChecked = Setup.AutoStart;
+        ShowSetupState();
+
         Say("Проверяю обновления…");
         try
         {
@@ -100,7 +111,13 @@ public partial class MainWindow : Window
             Say("Сервер обновлений не отвечает.", Short(ex.Message));
         }
 
-        _root = FindClient();
+        _root = ClientFinder.Quick(SavedRoot());
+        if (_root is not null) RememberRoot(_root);
+        ShowPath();
+
+        // Предложение поставить лаунчер задаём один раз и не при автозапуске:
+        // спрашивать о таком в момент включения компьютера — дурной тон.
+        if (!_autostart) OfferInstall();
 
         if (_root is null)
         {
@@ -111,7 +128,6 @@ public partial class MainWindow : Window
             _mode = Mode.Install;
             PlayBtn.Content = "УСТАНОВИТЬ";
             PlayBtn.IsEnabled = true;
-            FindBtn.Visibility = Visibility.Visible;
             return;
         }
 
@@ -127,40 +143,268 @@ public partial class MainWindow : Window
         await Sync();
     }
 
-    /// <summary>Ищем клиент рядом с собой, на уровень выше и там, где ставили прошлый раз.</summary>
-    private static string? FindClient()
+    // --- установка самого лаунчера -------------------------------------------
+
+    private string AskedFlag => Path.Combine(Setup.DataDir, "install-declined");
+
+    /// <summary>
+    /// Предлагаем поставить лаунчер на компьютер. Один раз: отказ запоминаем,
+    /// потому что программа, спрашивающая одно и то же при каждом запуске, —
+    /// это назойливость, а не забота.
+    /// </summary>
+    private void OfferInstall()
     {
-        var here = AppContext.BaseDirectory;
-        foreach (var dir in new[] { here, Path.GetDirectoryName(here.TrimEnd('\\')), SavedRoot() })
+        if (Setup.IsInstalled || Setup.RunningFromInstall) return;
+        if (File.Exists(AskedFlag)) return;
+
+        var answer = MessageBox.Show(
+            "Установить лаунчер на компьютер?" + Environment.NewLine + Environment.NewLine +
+            "Появятся ярлыки на рабочем столе и в меню «Пуск», а сам лаунчер будет " +
+            "запускаться вместе с Windows и держать игру обновлённой. " +
+            "Автозапуск потом отключается галочкой в окне." + Environment.NewLine + Environment.NewLine +
+            "Права администратора не нужны: ставим в вашу папку пользователя, " +
+            "удаление — через «Установленные приложения».",
+            "MurloVille", MessageBoxButton.YesNo, MessageBoxImage.Question);
+
+        if (answer != MessageBoxResult.Yes)
         {
-            if (dir is not null && File.Exists(Path.Combine(dir, "Wow.exe")))
-                return dir;
+            try
+            {
+                Directory.CreateDirectory(Setup.DataDir);
+                File.WriteAllText(AskedFlag, "");
+            }
+            catch { }
+            ShowSetupState();
+            return;
+        }
+
+        try
+        {
+            Setup.Install();
+            Setup.AutoStart = true;
+            AutoStartBox.IsChecked = true;
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show("Не смог установить лаунчер:" + Environment.NewLine + ex.Message,
+                "MurloVille", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+
+        ShowSetupState();
+    }
+
+    private void ShowSetupState()
+    {
+        SetupText.Text = Setup.IsInstalled
+            ? $"Лаунчер установлен в {Setup.InstallDir}. Удаляется через «Установленные приложения»."
+            : "Лаунчер не установлен — работает из той папки, где лежит файл.";
+    }
+
+    private void AutoStart_Click(object sender, RoutedEventArgs e)
+    {
+        var want = AutoStartBox.IsChecked == true;
+
+        // Включать автозапуск для файла из «Загрузок» бессмысленно: папку
+        // рано или поздно почистят, и в автозапуске останется битая ссылка.
+        if (want && !Setup.IsInstalled)
+        {
+            var answer = MessageBox.Show(
+                "Для автозапуска лаунчер лучше сначала установить на компьютер." +
+                Environment.NewLine + Environment.NewLine +
+                "Иначе автозапуск будет ссылаться на этот файл, и если папку почистят, " +
+                "запускать станет нечего." + Environment.NewLine + Environment.NewLine +
+                "Установить сейчас?",
+                "MurloVille", MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
+
+            if (answer == MessageBoxResult.Cancel)
+            {
+                AutoStartBox.IsChecked = false;
+                return;
+            }
+            if (answer == MessageBoxResult.Yes)
+            {
+                try { Setup.Install(); }
+                catch (Exception ex)
+                {
+                    MessageBox.Show("Не смог установить лаунчер:" + Environment.NewLine + ex.Message,
+                        "MurloVille", MessageBoxButton.OK, MessageBoxImage.Warning);
+                }
+                ShowSetupState();
+            }
+        }
+
+        Setup.AutoStart = want;
+        AutoStartBox.IsChecked = Setup.AutoStart;   // показываем то, что вышло на самом деле
+    }
+
+    // --- где лежит игра ------------------------------------------------------
+
+    /// <summary>
+    /// Настройки держим отдельно от программы: путь к игре должен пережить и
+    /// переустановку лаунчера, и запуск его из другой папки.
+    /// </summary>
+    private static string ConfigPath => Path.Combine(Setup.DataDir, "settings.txt");
+
+    /// <summary>Старое место, рядом с программой. Читаем ради тех, кто ставил до установщика.</summary>
+    private static string LegacyConfigPath => Path.Combine(AppContext.BaseDirectory, "murlo-launcher.txt");
+
+    private static string? SavedRoot()
+    {
+        foreach (var p in new[] { ConfigPath, LegacyConfigPath })
+        {
+            try
+            {
+                if (!File.Exists(p)) continue;
+                var s = File.ReadAllText(p).Trim();
+                if (s.Length > 0) return s;
+            }
+            catch { }
         }
         return null;
     }
 
-    private static string ConfigPath => Path.Combine(AppContext.BaseDirectory, "murlo-launcher.txt");
-
-    private static string? SavedRoot()
-    {
-        try { return File.Exists(ConfigPath) ? File.ReadAllText(ConfigPath).Trim() : null; }
-        catch { return null; }
-    }
-
     private static void RememberRoot(string root)
     {
-        try { File.WriteAllText(ConfigPath, root); } catch { }
+        try
+        {
+            Directory.CreateDirectory(Setup.DataDir);
+            File.WriteAllText(ConfigPath, root);
+        }
+        catch { }
+    }
+
+    private void ShowPath()
+    {
+        PathBox.Text = _root ?? "";
+        PathHint.Text = _root is null
+            ? "Игра не найдена. Впиши путь к папке с Wow.exe, выбери её кнопкой «Обзор» или нажми «Найти» — обойду диски сам."
+            : "Игра на месте.";
+    }
+
+    /// <summary>Принять путь, введённый руками или выбранный в проводнике.</summary>
+    private async Task ApplyPath(string raw)
+    {
+        var dir = raw.Trim().Trim('"');
+        if (dir.Length == 0 || _busy) return;
+        if (string.Equals(dir.TrimEnd('\\'), _root?.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase)) return;
+
+        if (!ClientFinder.IsClient(dir))
+        {
+            PathHint.Text = Directory.Exists(dir)
+                ? "В этой папке нет Wow.exe — нужна папка с самой игрой."
+                : "Такой папки нет.";
+            return;
+        }
+
+        _root = dir;
+        RememberRoot(dir);
+        ShowPath();
+        _mode = Mode.Play;
+        PlayBtn.Content = "ИГРАТЬ";
+        if (_manifest is not null) await Sync();
+    }
+
+    private async void PathBox_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Enter) return;
+        e.Handled = true;
+        await ApplyPath(PathBox.Text);
+    }
+
+    private async void PathBox_LostFocus(object sender, RoutedEventArgs e)
+        => await ApplyPath(PathBox.Text);
+
+    private async void Browse_Click(object sender, RoutedEventArgs e)
+    {
+        if (_busy) return;
+
+        var dlg = new Microsoft.Win32.OpenFolderDialog
+        {
+            Title = _root is null
+                ? "Укажи папку с игрой — или пустую папку, если игры ещё нет"
+                : "Укажи папку с установленной игрой — ту, где лежит Wow.exe",
+        };
+        if (dlg.ShowDialog() != true) return;
+
+        var target = dlg.FolderName;
+
+        if (ClientFinder.IsClient(target))
+        {
+            await ApplyPath(target);
+            return;
+        }
+
+        // Игры там нет — значит человек показывает, куда её поставить.
+        var gb = (_manifest?.totalBytes ?? 0) / 1073741824.0;
+        var notEmpty = Directory.Exists(target) && Directory.GetFileSystemEntries(target).Length > 0;
+
+        var answer = MessageBox.Show(
+            $"В этой папке нет Wow.exe." + Environment.NewLine + Environment.NewLine +
+            (notEmpty ? "Папка к тому же не пустая." + Environment.NewLine + Environment.NewLine : "") +
+            $"Установить игру сюда? Скачать предстоит {gb:0.#} ГБ.",
+            "MurloVille", MessageBoxButton.YesNo, MessageBoxImage.Question);
+        if (answer != MessageBoxResult.Yes) return;
+
+        _root = target;
+        RememberRoot(target);
+        PathBox.Text = target;
+        PathHint.Text = "Сюда поставим игру.";
+        if (_manifest is not null) await Sync();
     }
 
     /// <summary>
-    /// Запущена ли игра. Пока Wow.exe работает, он держит MPQ открытыми, и
-    /// заменить их нельзя — Windows отвечает отказом в доступе, из-за чего
-    /// обновление выглядит как поломка лаунчера.
+    /// Поиск игры по дискам. Долгий, поэтому идёт в стороне от окна и его
+    /// можно прервать той же кнопкой.
     /// </summary>
-    private static bool GameRunning()
+    private async void Scan_Click(object sender, RoutedEventArgs e)
     {
-        try { return Process.GetProcessesByName("Wow").Length > 0; }
-        catch { return false; }
+        if (_busy) return;
+
+        if (_scan is not null)          // уже ищем — значит это отмена
+        {
+            _scan.Cancel();
+            return;
+        }
+
+        _scan = new CancellationTokenSource();
+        ScanBtn.Content = "ОТМЕНА";
+        BrowseBtn.IsEnabled = false;
+        PathHint.Text = "Ищу игру на дисках…";
+
+        var where = new Progress<string>(dir => PathHint.Text = "Смотрю: " + dir);
+
+        List<string>? found = null;
+        var cancelled = false;
+        try
+        {
+            found = await Task.Run(() => ClientFinder.DeepScan(where, _scan.Token), _scan.Token);
+        }
+        catch (OperationCanceledException) { cancelled = true; }
+        catch (Exception ex) { PathHint.Text = "Поиск не удался: " + Short(ex.Message); }
+        finally
+        {
+            _scan.Dispose();
+            _scan = null;
+            ScanBtn.Content = "НАЙТИ";
+            BrowseBtn.IsEnabled = true;
+        }
+
+        if (found is null || found.Count == 0)
+        {
+            if (cancelled)
+                ShowPath();
+            else
+                PathHint.Text = "Игру не нашёл. Впиши путь руками или выбери папку кнопкой «Обзор» — "
+                              + "поиск смотрит не глубже четырёх уровней от корня диска.";
+            return;
+        }
+
+        // Одна копия — берём её. Несколько — спрашиваем: какая из них нужна,
+        // программа знать не может, а ошибка стоит шестнадцати гигабайт не туда.
+        var chosen = found.Count == 1 ? found[0] : ClientChoice.Ask(this, found);
+        if (chosen is null) { ShowPath(); return; }
+
+        await ApplyPath(chosen);
     }
 
     // --- установка и обновление одной дорогой --------------------------------
@@ -175,7 +419,7 @@ public partial class MainWindow : Window
 
         _busy = true;
         PlayBtn.IsEnabled = false;
-        FindBtn.IsEnabled = false;
+        SetPathControls(false);
         try
         {
             Say("Сверяю файлы…");
@@ -271,8 +515,15 @@ public partial class MainWindow : Window
         finally
         {
             _busy = false;
-            FindBtn.IsEnabled = true;
+            SetPathControls(true);
         }
+    }
+
+    private void SetPathControls(bool on)
+    {
+        PathBox.IsEnabled = on;
+        BrowseBtn.IsEnabled = on;
+        ScanBtn.IsEnabled = on;
     }
 
     private void OfferRetry(string status, string detail)
@@ -285,13 +536,22 @@ public partial class MainWindow : Window
 
     private string Local(Entry f) => Path.Combine(_root!, f.path.Replace('/', '\\'));
 
+    /// <summary>
+    /// Запущена ли игра. Пока Wow.exe работает, он держит MPQ открытыми, и
+    /// заменить их нельзя — Windows отвечает отказом в доступе, из-за чего
+    /// обновление выглядит как поломка лаунчера.
+    /// </summary>
+    private static bool GameRunning()
+    {
+        try { return Process.GetProcessesByName("Wow").Length > 0; }
+        catch { return false; }
+    }
+
     // --- сверка --------------------------------------------------------------
 
     private sealed record Plan(List<Entry> Todo, long Bytes);
 
-    /// <summary>
-    /// Считает, что надо докачать. Работает не в потоке интерфейса.
-    /// </summary>
+    /// <summary>Считает, что надо докачать. Работает не в потоке интерфейса.</summary>
     private Plan Check(IProgress<(int, int, string)> progress)
     {
         var files = _manifest!.files!;
@@ -324,9 +584,7 @@ public partial class MainWindow : Window
         return new Plan(todo, bytes);
     }
 
-    /// <summary>
-    /// Файл на месте и совпадает с манифестом?
-    /// </summary>
+    /// <summary>Файл на месте и совпадает с манифестом?</summary>
     private static bool IsGood(string local, Entry f, IReadOnlyDictionary<string, string> verified,
                                out string stamp)
     {
@@ -529,37 +787,7 @@ public partial class MainWindow : Window
         }
     }
 
-    // --- кнопки --------------------------------------------------------------
-
-    /// <summary>
-    /// «Найти игру» — для тех, у кого клиент уже стоит. Требуем Wow.exe в
-    /// указанной папке: иначе человек ткнёт в «Загрузки» и будет ждать, пока
-    /// туда приедет шестнадцать гигабайт.
-    /// </summary>
-    private async void Find_Click(object sender, RoutedEventArgs e)
-    {
-        var dlg = new Microsoft.Win32.OpenFolderDialog
-        {
-            Title = "Укажи папку с установленной игрой — ту, где лежит Wow.exe",
-        };
-        if (dlg.ShowDialog() != true) return;
-
-        if (!File.Exists(Path.Combine(dlg.FolderName, "Wow.exe")))
-        {
-            MessageBox.Show(
-                "В этой папке нет Wow.exe. Нужна папка с уже установленной игрой."
-                + Environment.NewLine + Environment.NewLine
-                + "Если игры нет — нажми «Установить», и я скачаю её сам.",
-                "MurloVille", MessageBoxButton.OK, MessageBoxImage.Warning);
-            return;
-        }
-
-        _root = dlg.FolderName;
-        RememberRoot(_root);
-        FindBtn.Visibility = Visibility.Collapsed;
-        PlayBtn.Content = "ИГРАТЬ";
-        await Sync();
-    }
+    // --- главная кнопка ------------------------------------------------------
 
     private async void Play_Click(object sender, RoutedEventArgs e)
     {
@@ -572,27 +800,7 @@ public partial class MainWindow : Window
 
         if (_root is null)
         {
-            var dlg = new Microsoft.Win32.OpenFolderDialog
-            {
-                Title = "Куда установить игру",
-            };
-            if (dlg.ShowDialog() != true) return;
-
-            var target = dlg.FolderName;
-            // В непустую чужую папку не льём: перепутать с «Загрузками» легко.
-            if (Directory.Exists(target) && Directory.GetFileSystemEntries(target).Length > 0
-                && !File.Exists(Path.Combine(target, "Wow.exe")))
-            {
-                var ok = MessageBox.Show(
-                    "Папка не пустая, и игры в ней нет.\nВсё равно ставить сюда?",
-                    "MurloVille", MessageBoxButton.YesNo, MessageBoxImage.Question);
-                if (ok != MessageBoxResult.Yes) return;
-            }
-
-            _root = target;
-            RememberRoot(_root);
-            FindBtn.Visibility = Visibility.Collapsed;
-            await Sync();
+            Browse_Click(sender, e);
             return;
         }
 
@@ -608,7 +816,7 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
-            MessageBox.Show("Не смог запустить игру:\n" + ex.Message, "MurloVille",
+            MessageBox.Show("Не смог запустить игру:" + Environment.NewLine + ex.Message, "MurloVille",
                 MessageBoxButton.OK, MessageBoxImage.Error);
         }
     }

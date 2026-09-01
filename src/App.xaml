@@ -1,7 +1,9 @@
+<!-- StartupUri тут нет намеренно: окно создаёт App.xaml.cs, потому что при
+     удалении открывать его не надо вовсе, а при автозапуске оно должно
+     появиться свёрнутым. Разбор ключей командной строки лежит там же. -->
 <Application x:Class="MurloLauncher.App"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-             StartupUri="MainWindow.xaml">
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
     <Application.Resources>
 
         <!-- Цвета сайта: тёмный камень и золото. -->
@@ -81,6 +83,74 @@
                                     HorizontalAlignment="Left"
                                     Background="{TemplateBinding Foreground}"/>
                         </Grid>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Маленькая кнопка рядом с полем пути: «Обзор» и «Найти». -->
+        <Style x:Key="SmallButton" TargetType="Button" BasedOn="{StaticResource GhostButton}">
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="Height" Value="34"/>
+            <Setter Property="Padding" Value="14,0"/>
+        </Style>
+
+        <!-- Поле пути к игре. Его можно и вписать руками: не у всех папка
+             лежит там, где её ищет поиск. -->
+        <Style x:Key="PathInput" TargetType="TextBox">
+            <Setter Property="Foreground" Value="{StaticResource Text}"/>
+            <Setter Property="CaretBrush" Value="{StaticResource Gold}"/>
+            <Setter Property="SelectionBrush" Value="{StaticResource GoldDim}"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="Height" Value="34"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+            <Setter Property="Padding" Value="10,0"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="TextBox">
+                        <Border x:Name="bd" CornerRadius="4" Background="#22000000"
+                                BorderBrush="#44E6C36A" BorderThickness="1">
+                            <ScrollViewer x:Name="PART_ContentHost" Margin="{TemplateBinding Padding}"
+                                          VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsKeyboardFocused" Value="True">
+                                <Setter TargetName="bd" Property="BorderBrush" Value="{StaticResource Gold}"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Галочка. Своя, потому что системная в тёмном окне выглядит чужой. -->
+        <Style x:Key="GoldCheck" TargetType="CheckBox">
+            <Setter Property="Foreground" Value="{StaticResource Text}"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="CheckBox">
+                        <StackPanel Orientation="Horizontal" Background="Transparent">
+                            <Border x:Name="box" Width="17" Height="17" CornerRadius="3"
+                                    Background="#22000000" BorderBrush="#66E6C36A" BorderThickness="1"
+                                    VerticalAlignment="Center">
+                                <Path x:Name="tick" Data="M 2,7 L 6,11 L 13,3"
+                                      Stroke="{StaticResource Gold}" StrokeThickness="2"
+                                      Visibility="Collapsed"
+                                      HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+                            <ContentPresenter Margin="10,0,0,0" VerticalAlignment="Center"/>
+                        </StackPanel>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="tick" Property="Visibility" Value="Visible"/>
+                                <Setter TargetName="box" Property="BorderBrush" Value="{StaticResource Gold}"/>
+                            </Trigger>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="box" Property="BorderBrush" Value="{StaticResource Gold}"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
                     </ControlTemplate>
                 </Setter.Value>
             </Setter>

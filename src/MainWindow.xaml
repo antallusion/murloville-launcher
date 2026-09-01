@@ -69,12 +69,43 @@
                 </StackPanel>
             </StackPanel>
 
-            <!-- Середина: состояние сервера -->
-            <StackPanel Grid.Row="1" VerticalAlignment="Center" Width="420"
+            <!-- Середина: состояние сервера, папка игры и автозапуск -->
+            <StackPanel Grid.Row="1" VerticalAlignment="Center" Width="470"
                         HorizontalAlignment="Left">
                 <TextBlock x:Name="OnlineText" Text=""
                            FontSize="15" Foreground="{StaticResource Text}"
                            TextWrapping="Wrap"/>
+
+                <!-- Путь к игре можно вписать руками, выбрать в проводнике или
+                     поручить поиску. Три пути к одному и тому же, потому что
+                     папка у всех лежит по-разному. -->
+                <TextBlock Text="ПАПКА С ИГРОЙ" FontSize="11" Margin="0,28,0,7"
+                           Foreground="{StaticResource TextMuted}"/>
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBox x:Name="PathBox" Grid.Column="0"
+                             Style="{StaticResource PathInput}"
+                             KeyDown="PathBox_KeyDown" LostFocus="PathBox_LostFocus"/>
+                    <Button x:Name="BrowseBtn" Grid.Column="1" Content="ОБЗОР"
+                            Style="{StaticResource SmallButton}" Margin="8,0,0,0"
+                            Click="Browse_Click"/>
+                    <Button x:Name="ScanBtn" Grid.Column="2" Content="НАЙТИ"
+                            Style="{StaticResource SmallButton}" Margin="8,0,0,0"
+                            Click="Scan_Click"/>
+                </Grid>
+                <TextBlock x:Name="PathHint" Text="" FontSize="11" Margin="2,7,0,0"
+                           Foreground="{StaticResource TextMuted}" TextWrapping="Wrap"/>
+
+                <CheckBox x:Name="AutoStartBox" Margin="0,20,0,0"
+                          Style="{StaticResource GoldCheck}"
+                          Content="Запускать вместе с Windows"
+                          Click="AutoStart_Click"/>
+                <TextBlock x:Name="SetupText" Text="" FontSize="11" Margin="27,7,0,0"
+                           Foreground="{StaticResource TextMuted}" TextWrapping="Wrap"/>
             </StackPanel>
 
             <!-- Низ: состояние, полоска, кнопка -->
@@ -97,12 +128,6 @@
 
                 <StackPanel Grid.Column="1" Orientation="Horizontal"
                             VerticalAlignment="Center">
-                    <!-- Показывается только когда игра не найдена: у кого клиент
-                         уже есть, тому качать шестнадцать гигабайт незачем. -->
-                    <Button x:Name="FindBtn" Content="НАЙТИ ИГРУ"
-                            Style="{StaticResource GhostButton}"
-                            Width="180" Height="58" Margin="0,0,12,0"
-                            Visibility="Collapsed" Click="Find_Click"/>
                     <Button x:Name="PlayBtn" Content="ИГРАТЬ"
                             Style="{StaticResource GoldButton}"
                             Width="210" Height="58" IsEnabled="False"
