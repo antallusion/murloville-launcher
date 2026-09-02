@@ -805,6 +805,7 @@ public partial class MainWindow : Window
         }
 
         FixRealmlist();
+        ClearWdbCache();
         try
         {
             Process.Start(new ProcessStartInfo(Path.Combine(_root, "Wow.exe"))
@@ -818,6 +819,25 @@ public partial class MainWindow : Window
         {
             MessageBox.Show("Не смог запустить игру:" + Environment.NewLine + ex.Message, "MurloVille",
                 MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    /// <summary>
+    /// Стираем кэш имён предметов и существ перед запуском. Клиент помнит
+    /// ответы сервера в Cache\WDB и после наших правок показывает старые
+    /// названия — «Noble Bruffalon Mount» вместо русского — пока кэш не
+    /// удалить руками. Игра без кэша просто спросит сервер заново.
+    /// </summary>
+    private void ClearWdbCache()
+    {
+        try
+        {
+            var wdb = Path.Combine(_root!, "Cache", "WDB");
+            if (Directory.Exists(wdb)) Directory.Delete(wdb, recursive: true);
+        }
+        catch
+        {
+            // Занято или нет прав — не страшно, игра запустится и так.
         }
     }
 
