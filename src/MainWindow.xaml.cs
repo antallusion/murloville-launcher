@@ -87,7 +87,8 @@ public partial class MainWindow : Window
     private sealed record Entry(string path, long size, string sha256, string src, string? remote);
 
     private sealed record Manifest(
-        string? launcherVersion, string? publicKey, long totalBytes, List<Entry>? files);
+        string? launcherVersion, string? launcherSha256, string? launcherUrl,
+        string? publicKey, long totalBytes, List<Entry>? files);
 
     // --- запуск --------------------------------------------------------------
 
@@ -99,10 +100,15 @@ public partial class MainWindow : Window
         AutoStartBox.IsChecked = Setup.AutoStart;
         ShowSetupState();
 
+        // Хвост от прошлого самообновления: старый файл нельзя было удалить,
+        // пока он работал. Теперь работаем мы — убираем.
+        TryDelete((Environment.ProcessPath ?? "") + ".old");
+
         Say("Проверяю обновления…");
         try
         {
-            var json = await Http.GetStringAsync($"{Base}/manifest.json");
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            var json = await Http.GetStringAsync($"{Base}/manifest.json", cts.Token);
             _manifest = JsonSerializer.Deserialize<Manifest>(json);
         }
         catch (Exception ex)
@@ -110,6 +116,10 @@ public partial class MainWindow : Window
             _manifest = null;
             Say("Сервер обновлений не отвечает.", Short(ex.Message));
         }
+
+        // Сначала обновляем себя: новая версия может уметь то, чего не умеет
+        // эта, а игра подождёт минуту. Если перезапустились — дальше не идём.
+        if (await SelfUpdate()) return;
 
         _root = ClientFinder.Quick(SavedRoot());
         if (_root is not null) RememberRoot(_root);
@@ -141,6 +151,96 @@ public partial class MainWindow : Window
         }
 
         await Sync();
+    }
+
+    // --- самообновление ------------------------------------------------------
+
+    /// <summary>
+    /// Лаунчер обновляет сам себя: манифест несёт номер свежей версии и
+    /// отпечаток файла. Скачиваем рядом, сверяем отпечаток, переименовываем
+    /// работающий файл в .old (Windows это разрешает, а перезаписать — нет),
+    /// ставим новый на его место и перезапускаемся с теми же ключами.
+    /// Любая осечка — остаёмся на старой версии и работаем дальше: обновление
+    /// лаунчера не повод оставить игрока без игры.
+    /// </summary>
+    private async Task<bool> SelfUpdate()
+    {
+        if (_manifest?.launcherVersion is null || string.IsNullOrEmpty(_manifest.launcherSha256)) return false;
+        if (!Version.TryParse(_manifest.launcherVersion, out var latest)) return false;
+
+        var mine = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version ?? new Version(0, 0, 0);
+        if (Trim(latest) <= Trim(mine)) return false;
+
+        var exe = Environment.ProcessPath;
+        if (exe is null) return false;
+        var fresh = exe + ".new";
+        var old = exe + ".old";
+
+        try
+        {
+            Say($"Обновляю лаунчер до {Trim(latest)}…", "Секунда, и перезапущусь сам.");
+            var url = string.IsNullOrEmpty(_manifest.launcherUrl) ? $"{Base}/MurloVille.exe" : _manifest.launcherUrl;
+            await Fetch(url, fresh);
+
+            await using (var s = File.OpenRead(fresh))
+            {
+                var hash = Convert.ToHexString(await SHA256.HashDataAsync(s)).ToLowerInvariant();
+                if (!hash.Equals(_manifest.launcherSha256, StringComparison.OrdinalIgnoreCase))
+                    throw new IOException("новый лаунчер скачался повреждённым");
+            }
+
+            TryDelete(old);
+            File.Move(exe, old);
+            try
+            {
+                File.Move(fresh, exe);
+            }
+            catch
+            {
+                File.Move(old, exe);   // вернуть как было, иначе останемся без программы
+                throw;
+            }
+
+            Process.Start(new ProcessStartInfo(exe)
+            {
+                UseShellExecute = true,
+                Arguments = _autostart ? "--autostart" : "",
+                WorkingDirectory = Path.GetDirectoryName(exe) ?? "",
+            });
+            Application.Current.Shutdown();
+            return true;
+        }
+        catch (Exception ex)
+        {
+            TryDelete(fresh);
+            Say("Лаунчер не обновился — работаю на прежней версии.", Short(ex.Message));
+            return false;
+        }
+    }
+
+    /// <summary>Три числа версии: у сборки их четыре, в манифесте три.</summary>
+    private static Version Trim(Version v) => new(v.Major, v.Minor, Math.Max(0, v.Build));
+
+    /// <summary>Простая загрузка целиком в файл, с защитой от застывшего потока.</summary>
+    private async Task Fetch(string url, string path)
+    {
+        using var headCts = new CancellationTokenSource(TimeSpan.FromSeconds(StallSeconds));
+        using var resp = await Http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, headCts.Token);
+        resp.EnsureSuccessStatusCode();
+        var total = resp.Content.Headers.ContentLength ?? 0;
+
+        await using var net = await resp.Content.ReadAsStreamAsync(headCts.Token);
+        await using var file = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 20);
+        var buf = new byte[1 << 20];
+        long have = 0;
+        while (true)
+        {
+            var read = await ReadOrStall(net, buf);
+            if (read <= 0) break;
+            await file.WriteAsync(buf.AsMemory(0, read));
+            have += read;
+            if (total > 0) Bar.Value = (double)have / total * 100;
+        }
     }
 
     // --- установка самого лаунчера -------------------------------------------
@@ -664,24 +764,53 @@ public partial class MainWindow : Window
 
     // --- загрузка ------------------------------------------------------------
 
+    /// <summary>
+    /// Сколько секунд поток может молчать, прежде чем мы сочтём его мёртвым.
+    /// Без этого лаунчер висел на застывшей ссылке Диска бесконечно и выглядел
+    /// зависшим — «встаёт и не обновляет дальше».
+    /// </summary>
+    private const int StallSeconds = 45;
+
+    /// <summary>Сколько раз пробуем один файл, прежде чем сдаться.</summary>
+    private const int Attempts = 4;
+
     /// <summary>Адрес файла. Для Диска ссылку приходится просить каждый раз: она временная.</summary>
-    private async Task<string> ResolveUrl(Entry f)
+    private async Task<string> ResolveUrl(Entry f, CancellationToken token)
     {
         if (f.src != "yandex")
             return $"{Base}/files/{f.path}";
 
         var url = $"{YandexApi}?public_key={Uri.EscapeDataString(_manifest!.publicKey!)}" +
                   $"&path={Uri.EscapeDataString(f.remote ?? "/" + f.path)}";
-        var json = await Http.GetStringAsync(url);
+        var json = await Http.GetStringAsync(url, token);
         using var doc = JsonDocument.Parse(json);
         return doc.RootElement.GetProperty("href").GetString()
                ?? throw new IOException("хранилище не дало ссылку");
     }
 
+    /// <summary>Чтение с таймаутом: молчание дольше StallSeconds — обрыв.</summary>
+    private static async Task<int> ReadOrStall(Stream net, byte[] buf)
+    {
+        using var stall = new CancellationTokenSource(TimeSpan.FromSeconds(StallSeconds));
+        try
+        {
+            return await net.ReadAsync(buf, stall.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            throw new TimeoutException("поток застыл");
+        }
+    }
+
+    private static bool IsTransient(Exception ex) =>
+        ex is IOException or HttpRequestException or TimeoutException
+           or OperationCanceledException or System.Net.Sockets.SocketException;
+
     /// <summary>
     /// Качаем в файл .part и дописываем с места обрыва. На шестнадцати
     /// гигабайтах разрыв связи — не исключение, а норма, и начинать заново
-    /// было бы издевательством.
+    /// было бы издевательством. Обрыв или застывший поток — берём свежую
+    /// ссылку и продолжаем с того же места, до четырёх попыток на файл.
     /// </summary>
     private async Task Download(Entry f, long doneBefore, long totalBytes, DateTime started)
     {
@@ -692,45 +821,22 @@ public partial class MainWindow : Window
         long have = File.Exists(part) ? new FileInfo(part).Length : 0;
         if (have > f.size) { File.Delete(part); have = 0; }
 
-        if (have < f.size)
+        for (var attempt = 1; have < f.size; attempt++)
         {
-            var req = new HttpRequestMessage(HttpMethod.Get, await ResolveUrl(f));
-            if (have > 0) req.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(have, null);
-
-            using var resp = await Http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead);
-            // Хранилище может не поддержать докачку — тогда начинаем сначала.
-            if (have > 0 && resp.StatusCode != HttpStatusCode.PartialContent)
+            try
             {
-                File.Delete(part);
-                have = 0;
+                have = await Pull(f, part, have, doneBefore, totalBytes, started);
             }
-            resp.EnsureSuccessStatusCode();
-
-            await using var net = await resp.Content.ReadAsStreamAsync();
-            await using var file = new FileStream(part, have > 0 ? FileMode.Append : FileMode.Create,
-                                                  FileAccess.Write, FileShare.None, 1 << 20);
-
-            var buf = new byte[1 << 20];
-            int read;
-            var lastShown = DateTime.UtcNow;
-            while ((read = await net.ReadAsync(buf)) > 0)
+            catch (Exception ex) when (attempt < Attempts && IsTransient(ex))
             {
-                await file.WriteAsync(buf.AsMemory(0, read));
-                have += read;
-
-                if ((DateTime.UtcNow - lastShown).TotalMilliseconds > 250)
-                {
-                    lastShown = DateTime.UtcNow;
-                    var doneNow = doneBefore + have;
-                    Bar.Value = (double)doneNow / totalBytes * 100;
-                    var secs = (DateTime.UtcNow - started).TotalSeconds;
-                    var speed = secs > 1 ? doneNow / secs : 0;
-                    DetailText.Text = speed > 0
-                        ? $"{f.path} — {Gb(doneNow)} из {Gb(totalBytes)}, {speed / 1048576:0.#} МБ/с, осталось {Remaining(totalBytes - doneNow, speed)}"
-                        : f.path;
-                }
+                DetailText.Text = $"{f.path} — обрыв связи, пробую снова ({attempt} из {Attempts - 1})";
+                await Task.Delay(1500 * attempt);
+                have = File.Exists(part) ? new FileInfo(part).Length : 0;
             }
         }
+
+        if (have < f.size)
+            throw new IOException("файл не докачался");
 
         if (!string.IsNullOrEmpty(f.sha256))
         {
@@ -747,6 +853,57 @@ public partial class MainWindow : Window
         }
 
         ReplaceFile(part, local);
+    }
+
+    /// <summary>Одна попытка: с текущего места до конца файла или до обрыва.</summary>
+    private async Task<long> Pull(Entry f, string part, long have, long doneBefore, long totalBytes, DateTime started)
+    {
+        using var linkCts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var req = new HttpRequestMessage(HttpMethod.Get, await ResolveUrl(f, linkCts.Token));
+        if (have > 0) req.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(have, null);
+
+        using var headCts = new CancellationTokenSource(TimeSpan.FromSeconds(StallSeconds));
+        using var resp = await Http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, headCts.Token);
+        // Хранилище может не поддержать докачку — тогда начинаем сначала.
+        if (have > 0 && resp.StatusCode != HttpStatusCode.PartialContent)
+        {
+            File.Delete(part);
+            have = 0;
+        }
+        resp.EnsureSuccessStatusCode();
+
+        // Диск при исчерпанном лимите отдаёт страницу с извинениями вместо
+        // файла. Качать её бессмысленно: скажем сразу и по-человечески.
+        var type = resp.Content.Headers.ContentType?.MediaType ?? "";
+        if (type.Contains("html", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("хранилище отдало страницу вместо файла — лимит Диска, попробуй позже");
+
+        await using var net = await resp.Content.ReadAsStreamAsync(headCts.Token);
+        await using var file = new FileStream(part, have > 0 ? FileMode.Append : FileMode.Create,
+                                              FileAccess.Write, FileShare.None, 1 << 20);
+
+        var buf = new byte[1 << 20];
+        var lastShown = DateTime.UtcNow;
+        while (true)
+        {
+            var read = await ReadOrStall(net, buf);
+            if (read <= 0) break;
+            await file.WriteAsync(buf.AsMemory(0, read));
+            have += read;
+
+            if ((DateTime.UtcNow - lastShown).TotalMilliseconds > 250)
+            {
+                lastShown = DateTime.UtcNow;
+                var doneNow = doneBefore + have;
+                Bar.Value = (double)doneNow / totalBytes * 100;
+                var secs = (DateTime.UtcNow - started).TotalSeconds;
+                var speed = secs > 1 ? doneNow / secs : 0;
+                DetailText.Text = speed > 0
+                    ? $"{f.path} — {Gb(doneNow)} из {Gb(totalBytes)}, {speed / 1048576:0.#} МБ/с, осталось {Remaining(totalBytes - doneNow, speed)}"
+                    : f.path;
+            }
+        }
+        return have;
     }
 
     /// <summary>
