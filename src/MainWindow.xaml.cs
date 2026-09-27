@@ -20,13 +20,11 @@ namespace MurloLauncher;
 /// Лаунчер MurloVille: ставит клиент с нуля и догоняет его до текущего
 /// состояния при каждом запуске.
 ///
-/// Файлы приезжают из двух мест, и это не случайность. Шестнадцать гигабайт
-/// базовых MPQ — стоковые файлы Blizzard, они не меняются никогда и лежат на
-/// Яндекс.Диске: там есть докачка и приличная скорость, а главное — этот
-/// трафик не идёт через игровой сервер. Одна установка равна пяти дням всего
-/// его исходящего трафика, и раздавать такое со своего канала значит лагать
-/// всем, кто в это время играет. Наши патчи и аддоны, вместе пять мегабайт,
-/// приезжают с игрового сервера: они меняются часто.
+/// Весь клиент — и шестнадцать гигабайт базовых MPQ, и наши патчи — лежит в
+/// нашем объектном хранилище S3 (firsts3.ru): ссылки постоянные, докачка
+/// честная, и трафик не идёт через игровой сервер (одна установка равна пяти
+/// дням всего его исходящего трафика). Файл, ещё не доехавший в хранилище,
+/// ненадолго качается с игрового сервера.
 ///
 /// Откуда что брать — написано в манифесте, а не в коде: хранилище можно
 /// переносить, не пересобирая лаунчер.
@@ -34,7 +32,6 @@ namespace MurloLauncher;
 public partial class MainWindow : Window
 {
     private const string Base = "https://play.murloville.ru/client";
-    private const string YandexApi = "https://cloud-api.yandex.net/v1/disk/public/resources/download";
     private const string Realm = "play.murloville.ru";
 
     private static readonly HttpClient Http = new(new HttpClientHandler
@@ -99,11 +96,11 @@ public partial class MainWindow : Window
 
     // --- модель манифеста ----------------------------------------------------
 
-    private sealed record Entry(string path, long size, string sha256, string src, string? remote, string? url);
+    private sealed record Entry(string path, long size, string sha256, string src, string? url);
 
     private sealed record Manifest(
         string? launcherVersion, string? launcherSha256, string? launcherUrl,
-        string? publicKey, string? baseUrl, long totalBytes, List<Entry>? files,
+        string? baseUrl, long totalBytes, List<Entry>? files,
         List<string>? ours);
 
     // --- запуск --------------------------------------------------------------
@@ -1302,7 +1299,7 @@ public partial class MainWindow : Window
 
     /// <summary>
     /// Сколько секунд поток может молчать, прежде чем мы сочтём его мёртвым.
-    /// Без этого лаунчер висел на застывшей ссылке Диска бесконечно и выглядел
+    /// Без этого лаунчер висел на застывшей ссылке бесконечно и выглядел
     /// зависшим — «встаёт и не обновляет дальше».
     /// </summary>
     private const int StallSeconds = 45;
@@ -1310,26 +1307,18 @@ public partial class MainWindow : Window
     /// <summary>Сколько раз пробуем один файл, прежде чем сдаться.</summary>
     private const int Attempts = 4;
 
-    /// <summary>Адрес файла. Для Диска ссылку приходится просить каждый раз: она временная.</summary>
-    private async Task<string> ResolveUrl(Entry f, CancellationToken token)
+    /// <summary>Адрес файла: прямая ссылка на хранилище S3, запасной путь — игровой сервер.</summary>
+    private Task<string> ResolveUrl(Entry f, CancellationToken token)
     {
         // Прямой адрес из манифеста — главный путь: с 2026-09-06 весь клиент
         // лежит в одном хранилище S3, ссылки постоянные и с докачкой.
         if (!string.IsNullOrEmpty(f.url))
-            return f.url!;
+            return Task.FromResult(f.url!);
 
         if (!string.IsNullOrEmpty(_manifest?.baseUrl) && f.src == "s3")
-            return $"{_manifest!.baseUrl!.TrimEnd('/')}/{EncodePath(f.path)}";
+            return Task.FromResult($"{_manifest!.baseUrl!.TrimEnd('/')}/{EncodePath(f.path)}");
 
-        if (f.src != "yandex")
-            return $"{Base}/files/{f.path}";
-
-        var url = $"{YandexApi}?public_key={Uri.EscapeDataString(_manifest!.publicKey!)}" +
-                  $"&path={Uri.EscapeDataString(f.remote ?? "/" + f.path)}";
-        var json = await Http.GetStringAsync(url, token);
-        using var doc = JsonDocument.Parse(json);
-        return doc.RootElement.GetProperty("href").GetString()
-               ?? throw new IOException("хранилище не дало ссылку");
+        return Task.FromResult($"{Base}/files/{f.path}");
     }
 
     /// <summary>Путь файла в адрес: каждый кусок кодируется отдельно, косые остаются.</summary>
@@ -1450,11 +1439,11 @@ public partial class MainWindow : Window
         }
         resp.EnsureSuccessStatusCode();
 
-        // Диск при исчерпанном лимите отдаёт страницу с извинениями вместо
-        // файла. Качать её бессмысленно: скажем сразу и по-человечески.
+        // Хранилище вместо файла может отдать страницу ошибки. Качать её
+        // бессмысленно: скажем сразу и по-человечески.
         var type = resp.Content.Headers.ContentType?.MediaType ?? "";
         if (type.Contains("html", StringComparison.OrdinalIgnoreCase))
-            throw new InvalidDataException("хранилище отдало страницу вместо файла — лимит Диска, попробуй позже");
+            throw new InvalidDataException("хранилище отдало страницу вместо файла — попробуй чуть позже");
 
         await using var net = await resp.Content.ReadAsStreamAsync(headCts.Token);
         await using var file = new FileStream(part, have > 0 ? FileMode.Append : FileMode.Create,
