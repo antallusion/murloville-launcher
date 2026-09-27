@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Threading;
 using Microsoft.Win32;
@@ -21,9 +22,28 @@ namespace MurloLauncher;
 /// </summary>
 internal static class ClientFinder
 {
-    /// <summary>Папка считается игрой, если в ней лежит Wow.exe.</summary>
+    /// <summary>Папка считается игрой, если в ней лежит Wow.exe — и это не современный WoW.</summary>
     public static bool IsClient(string? dir) =>
-        !string.IsNullOrWhiteSpace(dir) && File.Exists(Path.Combine(dir, "Wow.exe"));
+        !string.IsNullOrWhiteSpace(dir) && File.Exists(Path.Combine(dir, "Wow.exe")) && !IsModernClient(dir);
+
+    /// <summary>
+    /// Современный World of Warcraft, а не 3.3.5a. У него тоже есть Wow.exe, и
+    /// установщик Battle.net пишет путь к нему в тот же ключ реестра, что читает
+    /// быстрый поиск. Принять его за нашу игру значит налить восемнадцать
+    /// гигабайт поверх чужой установки и сломать её. Узнаём по .build.info
+    /// рядом (так раскладывает файлы Battle.net) и по версии самого Wow.exe.
+    /// </summary>
+    public static bool IsModernClient(string? dir)
+    {
+        if (string.IsNullOrWhiteSpace(dir)) return false;
+        try
+        {
+            if (File.Exists(Path.Combine(dir, ".build.info"))) return true;
+            var exe = Path.Combine(dir, "Wow.exe");
+            return File.Exists(exe) && FileVersionInfo.GetVersionInfo(exe).FileMajorPart >= 4;
+        }
+        catch { return false; }
+    }
 
     /// <summary>Быстрый поиск по вероятным местам. Мгновенный.</summary>
     public static string? Quick(string? savedRoot)
@@ -56,18 +76,45 @@ internal static class ClientFinder
             yield return ReadRegistry(RegistryHive.CurrentUser, key, "InstallPath");
         }
 
-        // Обычные места на каждом диске.
+        // Обычные места на каждом диске. Имена с «3.3.5» здесь не для красоты:
+        // так подписывают папку почти все, кто скачивал сборку с торрента или
+        // с чужого сервера, а это и есть главный наш случай — игра уже есть.
+        string[] names =
+        {
+            "wow", "WoW", "World of Warcraft",
+            "WoW 3.3.5", "WoW 3.3.5a", "wow 3.3.5a",
+            "World of Warcraft 3.3.5", "World of Warcraft 3.3.5a",
+            "WoW_3.3.5a", "WotLK", "Wrath of the Lich King",
+        };
+
         foreach (var drive in FixedDrives())
         {
             var root = drive.RootDirectory.FullName;
-            yield return Path.Combine(root, "wow");
-            yield return Path.Combine(root, "WoW");
-            yield return Path.Combine(root, "World of Warcraft");
-            yield return Path.Combine(root, "Games", "World of Warcraft");
-            yield return Path.Combine(root, "Games", "WoW");
-            yield return Path.Combine(root, "Games", "wow");
+            foreach (var name in names)
+            {
+                yield return Path.Combine(root, name);
+                yield return Path.Combine(root, "Games", name);
+                yield return Path.Combine(root, "Игры", name);
+            }
             yield return Path.Combine(root, "Program Files", "World of Warcraft");
             yield return Path.Combine(root, "Program Files (x86)", "World of Warcraft");
+        }
+
+        // Папки пользователя: рабочий стол и загрузки — куда чаще всего и
+        // распаковывают скачанный архив с игрой.
+        foreach (var special in new[]
+                 {
+                     Environment.SpecialFolder.DesktopDirectory,
+                     Environment.SpecialFolder.UserProfile,
+                 })
+        {
+            string dir;
+            try { dir = Environment.GetFolderPath(special); }
+            catch { continue; }
+            if (string.IsNullOrEmpty(dir)) continue;
+            foreach (var name in names) yield return Path.Combine(dir, name);
+            yield return Path.Combine(dir, "Downloads", "World of Warcraft");
+            yield return Path.Combine(dir, "Downloads", "WoW 3.3.5a");
         }
     }
 

@@ -20,7 +20,8 @@ namespace MurloLauncher;
 /// </summary>
 internal static class ClientChoice
 {
-    public static string? Ask(Window owner, IReadOnlyList<string> found)
+    /// <param name="describe">Пометка к копии — например, сколько в ней чужих архивов.</param>
+    public static string? Ask(Window owner, IReadOnlyList<string> found, Func<string, string?>? describe = null)
     {
         var res = Application.Current.Resources;
         var gold = (Brush)res["Gold"];
@@ -41,6 +42,7 @@ internal static class ClientChoice
         foreach (var dir in found)
         {
             var mark = ClientFinder.HasOurPatch(dir) ? "  ·  с нашими патчами" : "";
+            if (describe?.Invoke(dir) is { Length: > 0 } extra) mark += "  ·  " + extra;
             list.Items.Add(new ListBoxItem
             {
                 Content = dir + mark,
@@ -92,8 +94,16 @@ internal static class ClientChoice
             Foreground = muted,
             FontSize = 12,
             TextWrapping = TextWrapping.Wrap,
-            Margin = new Thickness(0, 0, 0, 16),
+            Margin = new Thickness(0, 0, 0, 12),
         });
+
+        // Здесь человек и совершает ту самую ошибку — выбирает клиент другого
+        // сервера. Предупреждаем до выбора, а не после.
+        body.Children.Add(Warning(
+            "Подойдёт только наш клиент или чистый оригинальный 3.3.5a. ",
+            "Клиент другого сервера не выбирай: наши файлы поверх чужих ломают персонажей — " +
+            "расы становятся невидимыми, экран выбора тёмным. Перед обновлением лаунчер " +
+            "сверит папку и скажет, если она не наша."));
         body.Children.Add(list);
         body.Children.Add(buttons);
 
@@ -126,5 +136,32 @@ internal static class ClientChoice
         };
 
         return win.ShowDialog() == true ? chosen : null;
+    }
+
+    /// <summary>Плашка-предупреждение с золотой чертой слева — как в главном окне.</summary>
+    internal static Border Warning(string head, string rest)
+    {
+        var res = Application.Current.Resources;
+        var tb = new TextBlock
+        {
+            Foreground = (Brush)res["Text"],
+            FontSize = 12,
+            TextWrapping = TextWrapping.Wrap,
+        };
+        tb.Inlines.Add(new System.Windows.Documents.Run(head)
+        {
+            FontWeight = FontWeights.SemiBold,
+            Foreground = (Brush)res["Gold"],
+        });
+        tb.Inlines.Add(new System.Windows.Documents.Run(rest));
+        return new Border
+        {
+            BorderBrush = new SolidColorBrush(Color.FromArgb(0x99, 0xE6, 0xC3, 0x6A)),
+            BorderThickness = new Thickness(2, 0, 0, 0),
+            Background = new SolidColorBrush(Color.FromArgb(0x14, 0xE6, 0xC3, 0x6A)),
+            Padding = new Thickness(10, 7, 8, 7),
+            Margin = new Thickness(0, 0, 0, 14),
+            Child = tb,
+        };
     }
 }

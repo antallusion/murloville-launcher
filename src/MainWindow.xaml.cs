@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Security.Cryptography;
@@ -46,14 +47,28 @@ public partial class MainWindow : Window
     };
 
     /// <summary>Что произойдёт по нажатию главной кнопки.</summary>
-    private enum Mode { Play, Install, Retry }
+    private enum Mode { Play, Install, Retry, Elevate }
 
     private readonly bool _autostart;
     private string? _root;
     private Manifest? _manifest;
     private Mode _mode = Mode.Play;
     private bool _busy;
+    /// <summary>Игра у человека уже есть — кладём сверху только наше.</summary>
+    private bool _patchOnly;
+    /// <summary>Разовая полная сверка по кнопке: считаем хеши заново, память не в счёт.</summary>
+    private bool _forceVerify;
+    /// <summary>Сколько байт клиенту ещё не хватает. Пока не ноль — в игру не пускаем.</summary>
+    private long _pending;
+    private readonly Options _options = Options.Load();
+    private readonly Throttle _throttle = new();
     private CancellationTokenSource? _scan;
+    /// <summary>
+    /// Не наши базовые архивы, которые человек разрешил заменить. Прежний файл
+    /// не затираем, а откладываем в сторону в момент замены — не раньше: если
+    /// загрузка оборвётся, игра останется с прежним файлом, а не без него.
+    /// </summary>
+    private readonly HashSet<string> _aside = new(StringComparer.OrdinalIgnoreCase);
 
     public MainWindow(bool autostart = false)
     {
@@ -84,11 +99,12 @@ public partial class MainWindow : Window
 
     // --- модель манифеста ----------------------------------------------------
 
-    private sealed record Entry(string path, long size, string sha256, string src, string? remote);
+    private sealed record Entry(string path, long size, string sha256, string src, string? remote, string? url);
 
     private sealed record Manifest(
         string? launcherVersion, string? launcherSha256, string? launcherUrl,
-        string? publicKey, long totalBytes, List<Entry>? files);
+        string? publicKey, string? baseUrl, long totalBytes, List<Entry>? files,
+        List<string>? ours);
 
     // --- запуск --------------------------------------------------------------
 
@@ -99,6 +115,7 @@ public partial class MainWindow : Window
 
         AutoStartBox.IsChecked = Setup.AutoStart;
         ShowSetupState();
+        ShowOptions();
 
         // Хвост от прошлого самообновления: старый файл нельзя было удалить,
         // пока он работал. Теперь работаем мы — убираем.
@@ -143,6 +160,7 @@ public partial class MainWindow : Window
 
         if (_manifest is null)
         {
+            _pending = 0;
             Say("Сервер обновлений не отвечает — играть можно.", "Клиент на месте.");
             Bar.Value = 100;
             _mode = Mode.Play;
@@ -377,9 +395,49 @@ public partial class MainWindow : Window
     {
         PathBox.Text = _root ?? "";
         PathHint.Text = _root is null
-            ? "Игра не найдена. Впиши путь к папке с Wow.exe, выбери её кнопкой «Обзор» или нажми «Найти» — обойду диски сам."
+            ? "Игра не найдена. Нажми «Установить» и выбери пустую папку. Наш клиент уже стоит? Впиши путь, выбери его кнопкой «Обзор» или нажми «Найти»."
             : "Игра на месте.";
     }
+
+    private const string NoteHead = "Играть можно только нашим клиентом.";
+    private const string NoteBody =
+        "Пустую папку лаунчер заполнит сам, чистый 3.3.5a доведёт до нашего. " +
+        "Клиент другого сервера не указывай: поверх него персонажи становятся невидимыми.";
+
+    /// <summary>
+    /// Плашка под путём. Обычно — спокойное правило золотом. Если человек
+    /// оставил чужой клиент как есть — красная, с тем, как это исправить:
+    /// невидимые персонажи через неделю не должны стать загадкой.
+    /// </summary>
+    private void ShowClientNote(bool foreign)
+    {
+        if (!foreign)
+        {
+            ClientNoteHead.Text = NoteHead;
+            ClientNoteBody.Text = NoteBody;
+            ClientNoteHead.Foreground = (System.Windows.Media.Brush)FindResource("Gold");
+            ClientNoteBox.BorderBrush = new System.Windows.Media.SolidColorBrush(
+                System.Windows.Media.Color.FromArgb(0x99, 0xE6, 0xC3, 0x6A));
+            ClientNoteBox.Background = new System.Windows.Media.SolidColorBrush(
+                System.Windows.Media.Color.FromArgb(0x14, 0xE6, 0xC3, 0x6A));
+            return;
+        }
+        ClientNoteHead.Text = "Эта папка не совпадает с нашим клиентом.";
+        ClientNoteBody.Text =
+            "Невидимые персонажи или тёмный экран — отсюда. Нажми «Проверить файлы» " +
+            "и выбери «Поставить наш клиент в новую папку».";
+        ClientNoteHead.Foreground = new System.Windows.Media.SolidColorBrush(
+            System.Windows.Media.Color.FromRgb(0xF0, 0xA0, 0x8A));
+        ClientNoteBox.BorderBrush = new System.Windows.Media.SolidColorBrush(
+            System.Windows.Media.Color.FromRgb(0xE0, 0x7A, 0x5F));
+        ClientNoteBox.Background = new System.Windows.Media.SolidColorBrush(
+            System.Windows.Media.Color.FromArgb(0x1F, 0xE0, 0x7A, 0x5F));
+    }
+
+    /// <summary>Современный WoW вместо 3.3.5a — объяснить, почему папка не годится.</summary>
+    private const string ModernHint =
+        "Это современный World of Warcraft, а не 3.3.5a — для MurloVille он не подойдёт, и трогать его я не буду. "
+        + "Выбери пустую папку: поставлю наш клиент.";
 
     /// <summary>Принять путь, введённый руками или выбранный в проводнике.</summary>
     private async Task ApplyPath(string raw)
@@ -390,8 +448,8 @@ public partial class MainWindow : Window
 
         if (!ClientFinder.IsClient(dir))
         {
-            PathHint.Text = Directory.Exists(dir)
-                ? "В этой папке нет Wow.exe — нужна папка с самой игрой."
+            PathHint.Text = ClientFinder.IsModernClient(dir) ? ModernHint
+                : Directory.Exists(dir) ? "В этой папке нет Wow.exe — нужна папка с самой игрой."
                 : "Такой папки нет.";
             return;
         }
@@ -399,6 +457,8 @@ public partial class MainWindow : Window
         _root = dir;
         RememberRoot(dir);
         ShowPath();
+        ShowClientNote(false);
+        PathHint.Text = "Проверю, наш ли это клиент, — до того как что-то качать.";
         _mode = Mode.Play;
         PlayBtn.Content = "ИГРАТЬ";
         if (_manifest is not null) await Sync();
@@ -421,8 +481,8 @@ public partial class MainWindow : Window
         var dlg = new Microsoft.Win32.OpenFolderDialog
         {
             Title = _root is null
-                ? "Укажи папку с игрой — или пустую папку, если игры ещё нет"
-                : "Укажи папку с установленной игрой — ту, где лежит Wow.exe",
+                ? "Пустая папка — поставлю наш клиент. Или папка с нашим клиентом либо чистым 3.3.5a"
+                : "Наш клиент или чистый 3.3.5a (папка с Wow.exe). Клиент другого сервера не подойдёт",
         };
         if (dlg.ShowDialog() != true) return;
 
@@ -431,6 +491,12 @@ public partial class MainWindow : Window
         if (ClientFinder.IsClient(target))
         {
             await ApplyPath(target);
+            return;
+        }
+
+        if (ClientFinder.IsModernClient(target))
+        {
+            PathHint.Text = ModernHint;
             return;
         }
 
@@ -449,6 +515,7 @@ public partial class MainWindow : Window
         RememberRoot(target);
         PathBox.Text = target;
         PathHint.Text = "Сюда поставим игру.";
+        ShowClientNote(false);
         if (_manifest is not null) await Sync();
     }
 
@@ -501,7 +568,17 @@ public partial class MainWindow : Window
 
         // Одна копия — берём её. Несколько — спрашиваем: какая из них нужна,
         // программа знать не может, а ошибка стоит шестнадцати гигабайт не туда.
-        var chosen = found.Count == 1 ? found[0] : ClientChoice.Ask(this, found);
+        // Чужие архивы видны по одному списку каталога, без чтения файлов, —
+        // можно пометить сразу, чтобы человек выбирал не вслепую.
+        var known = _manifest?.files?.Select(f => f.path).ToList();
+        string? Describe(string dir)
+        {
+            if (known is null) return null;
+            var n = ClientState.ForeignArchives(dir, known).Count;
+            return n > 0 ? $"чужих архивов: {n}" : null;
+        }
+
+        var chosen = found.Count == 1 ? found[0] : ClientChoice.Ask(this, found, Describe);
         if (chosen is null) { ShowPath(); return; }
 
         await ApplyPath(chosen);
@@ -515,14 +592,43 @@ public partial class MainWindow : Window
     /// </summary>
     private async Task Sync()
     {
-        if (_manifest?.files is null || _root is null || _busy) return;
+        // Круг повторяется, только если человек выбрал «поставить наш клиент в
+        // новую папку»: тогда сверка начинается заново уже для неё.
+        while (await SyncOnce()) { }
+    }
+
+    /// <returns>true — папка игры сменилась, надо пройти сверку ещё раз.</returns>
+    private async Task<bool> SyncOnce()
+    {
+        if (_manifest?.files is null || _root is null || _busy) return false;
+
+        // Права на запись выясняем до сверки: узнать об этом после получаса
+        // загрузки — худшее, что можно сделать с человеком.
+        if (!ClientState.CanWrite(_root))
+        {
+            Say("В эту папку нельзя писать без прав администратора.",
+                "Игра лежит в защищённом месте (обычно Program Files). "
+                + "Нажми кнопку — перезапущусь с правами и обновлю.");
+            _mode = Mode.Elevate;
+            PlayBtn.Content = "ОТ АДМИНИСТРАТОРА";
+            PlayBtn.IsEnabled = true;
+            return false;
+        }
+
+        // Игра уже стоит — значит, обновляем, а не ставим заново. Человек может
+        // потребовать сверить и стоковые архивы: тогда идём по всему списку.
+        _patchOnly = ClientState.HasBaseGame(_root) && !_options.CheckStock;
+        _throttle.SetLimit(_options.SpeedMbps);
+        _aside.Clear();
 
         _busy = true;
         PlayBtn.IsEnabled = false;
+        PlayBtn.Content = "ИГРАТЬ";   // не «Повторить»: пока идёт работа, повторять нечего
         SetPathControls(false);
         try
         {
-            Say("Сверяю файлы…");
+            Say("Сверяю файлы…",
+                _patchOnly ? "Сверяю основу клиента и наши патчи. Остальные стоковые архивы не трогаю." : null);
 
             // Сверка читает файлы и считает хеши, поэтому уходит с потока
             // интерфейса целиком: на шестнадцати гигабайтах окно иначе
@@ -535,14 +641,113 @@ public partial class MainWindow : Window
 
             var plan = await Task.Run(() => Check(progress));
 
-            if (plan.Todo.Count == 0)
+            // --- чужой клиент ---------------------------------------------
+            // Решаем до загрузки: что именно качать, зависит от ответа.
+            var todo = plan.Todo;
+            var foreignKept = false;
+            if (plan.Differs.Count > 0 || plan.Foreign.Count > 0)
             {
-                Say("Клиент обновлён.", "Всё на месте.");
+                var sig = Signature(plan);
+                ForeignClient.Choice choice;
+                if (!_forceVerify && AcceptedAsIs(sig))
+                {
+                    choice = ForeignClient.Choice.AsIs;   // уже решено раньше — не спрашиваем при каждом запуске
+                }
+                else if (WindowState == WindowState.Minimized)
+                {
+                    // Автозапуск: окно свёрнуто, а вопрос без ответа качать не
+                    // даёт. Ждём, пока человек откроет лаунчер сам.
+                    _pending = Math.Max(1, plan.Bytes);
+                    OfferRetry("Нужно решение: папка игры не совпадает с нашим клиентом.",
+                        "Нажми «Повторить» — покажу, что не так, и предложу варианты.");
+                    return false;
+                }
+                else
+                {
+                    Say("Эта папка не совпадает с нашим клиентом.", "Жду решения.");
+                    Bar.Value = 0;
+                    choice = ForeignClient.Ask(this,
+                        plan.Differs.Select(f => new ForeignClient.Differ(f.path, LocalSize(f), f.size)).ToList(),
+                        plan.Foreign,
+                        newFolderBytes: _manifest.totalBytes > 0 ? _manifest.totalBytes : _manifest.files.Sum(f => f.size),
+                        cleanUpBytes: plan.Bytes + plan.Differs.Sum(f => f.size),
+                        asIsBytes: plan.Bytes);
+                }
+
+                switch (choice)
+                {
+                    case ForeignClient.Choice.Cancel:
+                        _pending = Math.Max(1, plan.Bytes);
+                        OfferRetry("Обновление остановлено: папка не совпадает с нашим клиентом.",
+                            "Нажми «Повторить», чтобы выбрать, что делать, — или укажи другую папку.");
+                        return false;
+
+                    case ForeignClient.Choice.NewFolder:
+                        var fresh = PickNewFolder();
+                        if (fresh is null)
+                        {
+                            _pending = Math.Max(1, plan.Bytes);
+                            OfferRetry("Новая папка не выбрана — ничего не качаю.",
+                                "Нажми «Повторить», чтобы выбрать снова.");
+                            return false;
+                        }
+                        _root = fresh;
+                        RememberRoot(fresh);
+                        ShowPath();
+                        PathHint.Text = "Сюда поставлю наш клиент. Прежняя папка осталась как была.";
+                        ShowClientNote(false);
+                        return true;
+
+                    case ForeignClient.Choice.CleanUp:
+                        if (GameRunning())
+                        {
+                            OfferRetry("Игра запущена — отложить файлы не смогу.",
+                                "Закрой World of Warcraft и нажми «Повторить».");
+                            return false;
+                        }
+                        var stuck = await Task.Run(() => MoveForeignAside(plan.Foreign));
+                        if (stuck is not null)
+                        {
+                            OfferRetry("Не смог отложить чужие файлы.", stuck);
+                            return false;
+                        }
+                        todo = todo.Concat(plan.Differs).ToList();
+                        foreach (var f in plan.Differs) _aside.Add(f.path);
+                        ForgetAsIs();
+                        ShowClientNote(false);
+                        PathHint.Text = plan.Foreign.Count > 0
+                            ? $"Чужие архивы отложены в «{ClientState.AsideFolder}» внутри игры — ничего не удалено."
+                            : $"Прежние архивы отложу в «{ClientState.AsideFolder}» внутри игры, когда заменю.";
+                        break;
+
+                    case ForeignClient.Choice.AsIs:
+                        RememberAsIs(sig);
+                        foreignKept = true;
+                        ShowClientNote(true);
+                        PathHint.Text = "Игра на месте, но это не наш клиент — оставлено как есть.";
+                        break;
+                }
+            }
+            else
+            {
+                ForgetAsIs();
+                ShowClientNote(false);
+                if (ClientFinder.IsClient(_root)) PathHint.Text = "Игра на месте.";
+            }
+
+            var bytes = todo.Sum(f => f.size);
+            _pending = bytes;
+
+            if (todo.Count == 0)
+            {
+                Say("Клиент обновлён.", foreignKept
+                    ? "Папка оставлена как есть — если персонажи невидимы, смотри плашку выше."
+                    : "Всё на месте.");
                 Bar.Value = 100;
                 _mode = Mode.Play;
                 PlayBtn.Content = "ИГРАТЬ";
                 PlayBtn.IsEnabled = true;
-                return;
+                return false;
             }
 
             // Игру надо закрыть до начала, а не узнавать об этом на первом же
@@ -552,43 +757,63 @@ public partial class MainWindow : Window
                 OfferRetry("Игра запущена — обновить не смогу.",
                     "Закрой World of Warcraft и нажми «Повторить». Пока игра работает, "
                     + "она держит файлы клиента и заменить их нельзя.");
-                return;
+                return false;
             }
 
             // Место проверяем до начала, а не на двенадцатом гигабайте.
-            if (!EnoughSpace(plan.Bytes, out var freeGb))
+            if (!EnoughSpace(bytes, out var freeGb))
             {
                 Bar.Value = 0;
                 OfferRetry("Не хватает места на диске.",
-                    $"Нужно {Gb(plan.Bytes)}, свободно {freeGb:0.#} ГБ. Освободи место и нажми «Повторить».");
-                return;
+                    $"Нужно {Gb(bytes)}, свободно {freeGb:0.#} ГБ. Освободи место и нажми «Повторить».");
+                return false;
             }
 
-            var big = plan.Bytes > 1073741824;   // больше гигабайта — это установка
-            Say(big ? $"Устанавливаю игру: {Gb(plan.Bytes)}" : $"Качаю обновление: {Gb(plan.Bytes)}",
+            var big = bytes > 1073741824;   // больше гигабайта — это установка
+            Say(big ? $"Устанавливаю игру: {Gb(bytes)}" : $"Качаю обновление: {Gb(bytes)}",
                 big ? "Первый раз это долго. Можно свернуть окно." : null);
             Bar.Value = 0;
 
-            long done = 0;
-            var started = DateTime.UtcNow;
-            var failed = new List<string>();
-
-            foreach (var f in plan.Todo)
+            // Хвосты прошлой прерванной загрузки засчитываем сразу, иначе
+            // полоска начнёт с нуля там, где половина уже скачана.
+            _bytesDone = 0;
+            foreach (var f in todo)
             {
+                var part = Local(f) + ".part";
+                if (File.Exists(part)) _bytesDone += new FileInfo(part).Length;
+            }
+
+            var started = DateTime.UtcNow;
+            var failed = new System.Collections.Concurrent.ConcurrentBag<string>();
+
+            // Несколько файлов разом: один поток редко забирает всю полосу, а
+            // на установке в семнадцать гигабайт это разница между часом и
+            // тремя. Сколько именно — задаёт человек в настройках.
+            var lanes = Math.Clamp(_options.Parallel, 1, Options.MaxParallel);
+            var gate = new SemaphoreSlim(lanes);
+            var stop = false;
+
+            await Task.WhenAll(todo.Select(async f =>
+            {
+                await gate.WaitAsync();
                 try
                 {
-                    await Download(f, done, plan.Bytes, started);
+                    if (Volatile.Read(ref stop)) return;
+                    await Download(f, bytes, started);
                 }
                 catch (Exception ex)
                 {
                     // Один упавший файл не повод бросать остальные: чаще всего
-                    // это единственный занятый MPQ, а не общая беда.
+                    // это единственный занятый MPQ, а не общая беда. А вот
+                    // запущенная игра — беда общая, и дальше идти незачем.
                     failed.Add($"{f.path}: {Short(ex.Message)}");
-                    if (GameRunning()) break;   // дальше будет ровно то же самое
+                    if (GameRunning()) Volatile.Write(ref stop, true);
                 }
-                done += f.size;
-                Bar.Value = (double)done / plan.Bytes * 100;
-            }
+                finally
+                {
+                    gate.Release();
+                }
+            }));
 
             if (failed.Count > 0)
             {
@@ -598,19 +823,30 @@ public partial class MainWindow : Window
                     OfferRetry("Игра запущена — обновление не доставить.",
                         "Закрой World of Warcraft и нажми «Повторить».");
                 }
+                else if (!ClientState.CanWrite(_root))
+                {
+                    // Права могли отобрать и посреди работы — например,
+                    // антивирус запер папку.
+                    Say("Не хватило прав на запись.", "Перезапущусь с правами администратора и доделаю.");
+                    _mode = Mode.Elevate;
+                    PlayBtn.Content = "ОТ АДМИНИСТРАТОРА";
+                    PlayBtn.IsEnabled = true;
+                }
                 else
                 {
-                    OfferRetry("Часть файлов не обновилась.", failed[0] + tail);
+                    OfferRetry("Часть файлов не обновилась.", failed.First() + tail);
                 }
-                return;
+                return false;
             }
 
+            _pending = 0;
             Say(big ? "Игра установлена." : "Обновление установлено.",
-                $"Файлов: {plan.Todo.Count}, {Gb(plan.Bytes)}");
+                $"Файлов: {todo.Count}, {Gb(bytes)}");
             Bar.Value = 100;
             _mode = Mode.Play;
             PlayBtn.Content = "ИГРАТЬ";
             PlayBtn.IsEnabled = true;
+            return false;
         }
         finally
         {
@@ -624,6 +860,89 @@ public partial class MainWindow : Window
         PathBox.IsEnabled = on;
         BrowseBtn.IsEnabled = on;
         ScanBtn.IsEnabled = on;
+        RefreshBtn.IsEnabled = on;
+        VerifyBtn.IsEnabled = on;
+    }
+
+    // --- настройки загрузки --------------------------------------------------
+
+    private void ShowOptions()
+    {
+        SpeedBox.Text = _options.SpeedMbps > 0
+            ? _options.SpeedMbps.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture)
+            : "0";
+        if (ParallelBox.Items.Count == 0)
+            for (var i = 1; i <= Options.MaxParallel; i++) ParallelBox.Items.Add(i);
+        ParallelBox.SelectedItem = _options.Parallel;
+        StockBox.IsChecked = _options.CheckStock;
+        _throttle.SetLimit(_options.SpeedMbps);
+    }
+
+    private void Options_Click(object sender, RoutedEventArgs e) =>
+        OptionsPanel.Visibility = OptionsPanel.Visibility == Visibility.Visible
+            ? Visibility.Collapsed : Visibility.Visible;
+
+    private void Speed_Changed(object sender, RoutedEventArgs e)
+    {
+        var text = (SpeedBox.Text ?? "").Replace(',', '.').Trim();
+        _options.SpeedMbps = double.TryParse(text, System.Globalization.NumberStyles.Float,
+            System.Globalization.CultureInfo.InvariantCulture, out var v) && v > 0 ? v : 0;
+        _options.Save();
+        ShowOptions();
+    }
+
+    private void Speed_Key(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.Enter) Speed_Changed(sender, e);
+    }
+
+    private void Parallel_Changed(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+    {
+        if (ParallelBox.SelectedItem is int n && n != _options.Parallel)
+        {
+            _options.Parallel = n;
+            _options.Save();
+        }
+    }
+
+    private void Stock_Click(object sender, RoutedEventArgs e)
+    {
+        _options.CheckStock = StockBox.IsChecked == true;
+        _options.Save();
+    }
+
+    /// <summary>Перечитать манифест и догнать клиент — по кнопке, без перезапуска.</summary>
+    private async void Refresh_Click(object sender, RoutedEventArgs e)
+    {
+        if (_busy) return;
+        Say("Спрашиваю сервер обновлений…");
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            var json = await Http.GetStringAsync($"{Base}/manifest.json?t={DateTime.UtcNow.Ticks}", cts.Token);
+            _manifest = JsonSerializer.Deserialize<Manifest>(json);
+        }
+        catch (Exception ex)
+        {
+            Say("Сервер обновлений не отвечает.", Short(ex.Message));
+            return;
+        }
+        if (await SelfUpdate()) return;
+        if (_root is null) { Say("Сначала укажи папку с игрой."); return; }
+        await Sync();
+    }
+
+    /// <summary>
+    /// Полная сверка по кнопке: считаем хеши заново, не веря прошлым записям.
+    /// Это лечение для случая «файлы вроде на месте, а игра ведёт себя странно»:
+    /// битый файл того же размера иначе не найти.
+    /// </summary>
+    private async void Verify_Click(object sender, RoutedEventArgs e)
+    {
+        if (_busy || _root is null) return;
+        _forceVerify = true;
+        try { await Sync(); }
+        finally { _forceVerify = false; }
     }
 
     private void OfferRetry(string status, string detail)
@@ -647,31 +966,115 @@ public partial class MainWindow : Window
         catch { return false; }
     }
 
+    /// <summary>
+    /// Уйти вместе с игрой.
+    ///
+    /// После запуска лаунчер остаётся в памяти только ради просьб из игры, и
+    /// висеть после её закрытия ему незачем. Ждём, пока игра появится, и
+    /// выходим, когда она пропала. Если она так и не появилась за минуту —
+    /// не запустилась, путь не тот, антивирус, — выходим тоже: невидимый
+    /// процесс, висящий вечно, хуже любой ошибки.
+    /// </summary>
+    private void WatchGameExit()
+    {
+        var timer = new System.Windows.Threading.DispatcherTimer
+        {
+            Interval = TimeSpan.FromSeconds(5),
+        };
+        var appeared = false;
+        var waited = 0;
+        timer.Tick += (_, _) =>
+        {
+            if (GameRunning())
+            {
+                appeared = true;
+                return;
+            }
+            waited += 5;
+            if (!appeared && waited < 60)
+                return;
+            timer.Stop();
+            ShopWatch.Stop();
+            Application.Current.Shutdown();
+        };
+        timer.Start();
+    }
+
     // --- сверка --------------------------------------------------------------
 
-    private sealed record Plan(List<Entry> Todo, long Bytes);
+    /// <param name="Todo">Что докачать в любом случае.</param>
+    /// <param name="Differs">Базовые патчи, которые есть, но не наши. Качаются, только если человек разрешил.</param>
+    /// <param name="Foreign">Архивы, которых в нашем клиенте нет вовсе.</param>
+    private sealed record Plan(List<Entry> Todo, long Bytes, List<Entry> Differs, List<ClientState.Extra> Foreign);
+
+    /// <summary>Перезапуск с правами администратора — тем же путём и ключами.</summary>
+    private void Elevate()
+    {
+        var exe = Environment.ProcessPath;
+        if (exe is null) return;
+        try
+        {
+            Process.Start(new ProcessStartInfo(exe)
+            {
+                UseShellExecute = true,
+                Verb = "runas",
+                Arguments = _autostart ? "--autostart" : "",
+                WorkingDirectory = Path.GetDirectoryName(exe) ?? "",
+            });
+            Application.Current.Shutdown();
+        }
+        catch
+        {
+            // Отказался в окне UAC — остаёмся как были.
+            Say("Без прав администратора обновить эту папку не выйдет.",
+                "Либо разреши запуск от администратора, либо перенеси игру в обычную папку — например C:\\Games\\WoW.");
+        }
+    }
 
     /// <summary>Считает, что надо докачать. Работает не в потоке интерфейса.</summary>
     private Plan Check(IProgress<(int, int, string)> progress)
     {
-        var files = _manifest!.files!;
-        var verified = LoadVerified();
+        var all = _manifest!.files!;
+        var files = all;
+        // В готовой папке проверяем только своё: стоковые архивы не наше
+        // дело, и перекачивать их незачем. Три исключения. Базовые патчи
+        // сверяем всегда — у нас они не стоковые, и чужие под нашими таблицами
+        // дают невидимых персонажей. Недостающие архивы докачиваем — без них
+        // игра не запустится вовсе (так бывает после прерванной установки).
+        if (_patchOnly)
+            files = all.Where(f => ClientState.IsOurs(f.path, _manifest!.ours)
+                                   || ClientState.IsBasePatch(f.path)
+                                   || (f.path.EndsWith(".MPQ", StringComparison.OrdinalIgnoreCase)
+                                       && !File.Exists(Local(f))))
+                       .ToList();
+        // По кнопке «проверить файлы» память о прошлых сверках не в счёт.
+        var verified = _forceVerify ? new Dictionary<string, string>() : LoadVerified();
         var fresh = new Dictionary<string, string>();
 
         var todo = new List<Entry>();
+        var differs = new List<Entry>();
         long bytes = 0;
 
         for (var i = 0; i < files.Count; i++)
         {
             var f = files[i];
-            progress.Report((i, files.Count, f.path));
-
             var local = Local(f);
+            progress.Report((i, files.Count,
+                WillHash(local, f, verified) && f.size > 256L * 1048576
+                    ? $"{f.path} — считаю отпечаток, большой архив, до минуты"
+                    : f.path));
+
             if (IsGood(local, f, verified, out var stamp))
             {
                 fresh[f.path] = stamp;
                 // Хвост от прошлой прерванной загрузки этому файлу уже не нужен.
                 TryDelete(local + ".part");
+            }
+            else if (_patchOnly && !ClientState.IsOurs(f.path, _manifest!.ours) && File.Exists(local))
+            {
+                // Базовый патч есть, но не наш: молча затирать нельзя — это
+                // может быть чужая сборка, дорогая человеку. Решает он.
+                differs.Add(f);
             }
             else
             {
@@ -680,8 +1083,141 @@ public partial class MainWindow : Window
             }
         }
 
+        // Посторонние архивы ищем, только если в папке уже что-то лежит: в
+        // пустой папке под установку искать нечего.
+        var foreign = Directory.Exists(Path.Combine(_root!, "Data"))
+            ? ClientState.ForeignArchives(_root!, all.Select(f => f.path))
+            : new List<ClientState.Extra>();
+
         SaveVerified(fresh);
-        return new Plan(todo, bytes);
+        return new Plan(todo, bytes, differs, foreign);
+    }
+
+    /// <summary>Придётся ли считать хеш: размер совпал, а в памяти прошлых сверок файла нет.</summary>
+    private static bool WillHash(string local, Entry f, IReadOnlyDictionary<string, string> verified)
+    {
+        var info = new FileInfo(local);
+        if (!info.Exists || info.Length != f.size || string.IsNullOrEmpty(f.sha256)) return false;
+        return !(verified.TryGetValue(f.path, out var known)
+                 && known == $"{info.Length}|{info.LastWriteTimeUtc.Ticks}|{f.sha256}");
+    }
+
+    private long LocalSize(Entry f)
+    {
+        try { return new FileInfo(Local(f)).Length; }
+        catch { return 0; }
+    }
+
+    // --- чужой клиент: решения -----------------------------------------------
+
+    /// <summary>
+    /// «Продолжить как есть» запоминаем, иначе окно выскакивало бы при каждом
+    /// запуске. Но запоминаем именно этот набор отличий: появился новый чужой
+    /// архив — спросим заново. Кнопка «Проверить файлы» спрашивает всегда.
+    /// </summary>
+    private string AsIsPath => Path.Combine(_root!, "murlo-launcher.asis");
+
+    private static string Signature(Plan plan) => string.Join("|",
+        plan.Differs.Select(f => f.path)
+            .Concat(plan.Foreign.Select(x => $"{x.Path}:{x.Size}"))
+            .OrderBy(x => x, StringComparer.OrdinalIgnoreCase));
+
+    private bool AcceptedAsIs(string sig)
+    {
+        try { return File.Exists(AsIsPath) && File.ReadAllText(AsIsPath).Trim() == sig; }
+        catch { return false; }
+    }
+
+    private void RememberAsIs(string sig)
+    {
+        try { File.WriteAllText(AsIsPath, sig); } catch { }
+    }
+
+    private void ForgetAsIs() => TryDelete(AsIsPath);
+
+    /// <summary>
+    /// Откладывает посторонние архивы. Возвращает текст ошибки или null.
+    /// Работает не в потоке интерфейса: переименование мгновенное, но
+    /// антивирус может придержать файл на секунду.
+    /// </summary>
+    private string? MoveForeignAside(IEnumerable<ClientState.Extra> foreign)
+    {
+        foreach (var x in foreign)
+        {
+            try
+            {
+                ClientState.MoveAside(_root!, x.Path, "нет в клиенте MurloVille");
+            }
+            catch (Exception ex)
+            {
+                return $"{x.Path}: {Short(ex.Message)}";
+            }
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Новая папка под наш клиент. Пустая — ставим прямо в неё. Не пустая —
+    /// предлагаем подпапку MurloVille: разложить восемнадцать гигабайт поверх
+    /// чьих-то «Загрузок» — не то, чего человек ждал.
+    /// </summary>
+    private string? PickNewFolder()
+    {
+        string? start = null;
+        try { start = Path.GetDirectoryName(_root!.TrimEnd('\\')); } catch { }
+
+        while (true)
+        {
+            var dlg = new Microsoft.Win32.OpenFolderDialog
+            {
+                Title = "Новая папка для клиента MurloVille — лучше пустая",
+            };
+            if (!string.IsNullOrEmpty(start) && Directory.Exists(start)) dlg.InitialDirectory = start;
+            if (dlg.ShowDialog(this) != true) return null;
+            var target = dlg.FolderName;
+
+            if (ClientFinder.IsClient(target) || ClientFinder.IsModernClient(target) ||
+                string.Equals(target.TrimEnd('\\'), _root!.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase))
+            {
+                MessageBox.Show(this,
+                    "Здесь уже лежит игра. Для нашего клиента нужна другая, лучше пустая папка — " +
+                    "её можно создать прямо в окне выбора.",
+                    "MurloVille", MessageBoxButton.OK, MessageBoxImage.Information);
+                start = target;
+                continue;
+            }
+
+            bool empty;
+            try { empty = !Directory.Exists(target) || Directory.GetFileSystemEntries(target).Length == 0; }
+            catch { empty = false; }
+            if (empty) return target;
+
+            var sub = Path.Combine(target, "MurloVille");
+            try
+            {
+                for (var n = 2; Directory.Exists(sub) && Directory.GetFileSystemEntries(sub).Length > 0; n++)
+                    sub = Path.Combine(target, $"MurloVille {n}");
+            }
+            catch { }
+
+            var answer = MessageBox.Show(this,
+                $"Папка не пустая. Поставить клиент в «{sub}»?" + Environment.NewLine + Environment.NewLine +
+                "«Нет» — ставить прямо сюда, рядом с тем, что уже лежит.",
+                "MurloVille", MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
+            if (answer == MessageBoxResult.Yes)
+            {
+                try { Directory.CreateDirectory(sub); }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(this, "Не смог создать папку:" + Environment.NewLine + ex.Message,
+                        "MurloVille", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    continue;
+                }
+                return sub;
+            }
+            if (answer == MessageBoxResult.No) return target;
+            start = target;
+        }
     }
 
     /// <summary>Файл на месте и совпадает с манифестом?</summary>
@@ -777,6 +1313,14 @@ public partial class MainWindow : Window
     /// <summary>Адрес файла. Для Диска ссылку приходится просить каждый раз: она временная.</summary>
     private async Task<string> ResolveUrl(Entry f, CancellationToken token)
     {
+        // Прямой адрес из манифеста — главный путь: с 2026-09-06 весь клиент
+        // лежит в одном хранилище S3, ссылки постоянные и с докачкой.
+        if (!string.IsNullOrEmpty(f.url))
+            return f.url!;
+
+        if (!string.IsNullOrEmpty(_manifest?.baseUrl) && f.src == "s3")
+            return $"{_manifest!.baseUrl!.TrimEnd('/')}/{EncodePath(f.path)}";
+
         if (f.src != "yandex")
             return $"{Base}/files/{f.path}";
 
@@ -787,6 +1331,10 @@ public partial class MainWindow : Window
         return doc.RootElement.GetProperty("href").GetString()
                ?? throw new IOException("хранилище не дало ссылку");
     }
+
+    /// <summary>Путь файла в адрес: каждый кусок кодируется отдельно, косые остаются.</summary>
+    private static string EncodePath(string path) =>
+        string.Join("/", path.Replace(Path.DirectorySeparatorChar, '/').Split('/').Select(Uri.EscapeDataString));
 
     /// <summary>Чтение с таймаутом: молчание дольше StallSeconds — обрыв.</summary>
     private static async Task<int> ReadOrStall(Stream net, byte[] buf)
@@ -812,7 +1360,7 @@ public partial class MainWindow : Window
     /// было бы издевательством. Обрыв или застывший поток — берём свежую
     /// ссылку и продолжаем с того же места, до четырёх попыток на файл.
     /// </summary>
-    private async Task Download(Entry f, long doneBefore, long totalBytes, DateTime started)
+    private async Task Download(Entry f, long totalBytes, DateTime started)
     {
         var local = Local(f);
         Directory.CreateDirectory(Path.GetDirectoryName(local)!);
@@ -825,7 +1373,7 @@ public partial class MainWindow : Window
         {
             try
             {
-                have = await Pull(f, part, have, doneBefore, totalBytes, started);
+                have = await Pull(f, part, have, totalBytes, started);
             }
             catch (Exception ex) when (attempt < Attempts && IsTransient(ex))
             {
@@ -852,11 +1400,41 @@ public partial class MainWindow : Window
             }
         }
 
+        // Не наш базовый архив, который человек разрешил заменить: прежний
+        // откладываем в сторону, а не затираем. Именно сейчас, когда наш уже
+        // скачан и проверен, — оборвись загрузка раньше, игра осталась бы
+        // вовсе без файла.
+        if (_aside.Contains(f.path) && File.Exists(local))
+            ClientState.MoveAside(_root!, f.path, "заменён архивом MurloVille");
+
         ReplaceFile(part, local);
     }
 
+    /// <summary>
+    /// Сколько байт уже легло на диск за эту загрузку. Общий счётчик на все
+    /// потоки: при нескольких файлах разом «сколько осталось» иначе не
+    /// посчитать.
+    /// </summary>
+    private long _bytesDone;
+
+    private void ShowProgress(string path, long totalBytes, DateTime started)
+    {
+        var done = Interlocked.Read(ref _bytesDone);
+        var show = () =>
+        {
+            Bar.Value = totalBytes > 0 ? Math.Min(100, (double)done / totalBytes * 100) : 0;
+            var secs = (DateTime.UtcNow - started).TotalSeconds;
+            var speed = secs > 1 ? done / secs : 0;
+            DetailText.Text = speed > 0
+                ? $"{path} — {Gb(done)} из {Gb(totalBytes)}, {speed / 1048576:0.#} МБ/с, осталось {Remaining(totalBytes - done, speed)}"
+                : path;
+        };
+        if (Dispatcher.CheckAccess()) show();
+        else Dispatcher.BeginInvoke(show);
+    }
+
     /// <summary>Одна попытка: с текущего места до конца файла или до обрыва.</summary>
-    private async Task<long> Pull(Entry f, string part, long have, long doneBefore, long totalBytes, DateTime started)
+    private async Task<long> Pull(Entry f, string part, long have, long totalBytes, DateTime started)
     {
         using var linkCts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         var req = new HttpRequestMessage(HttpMethod.Get, await ResolveUrl(f, linkCts.Token));
@@ -882,7 +1460,10 @@ public partial class MainWindow : Window
         await using var file = new FileStream(part, have > 0 ? FileMode.Append : FileMode.Create,
                                               FileAccess.Write, FileShare.None, 1 << 20);
 
-        var buf = new byte[1 << 20];
+        // Кусок поменьше, когда скорость ограничена: с мегабайтным буфером
+        // ограничитель дёргал бы загрузку рывками по секунде.
+        var chunk = _options.SpeedMbps > 0 ? 1 << 16 : 1 << 20;
+        var buf = new byte[chunk];
         var lastShown = DateTime.UtcNow;
         while (true)
         {
@@ -890,17 +1471,15 @@ public partial class MainWindow : Window
             if (read <= 0) break;
             await file.WriteAsync(buf.AsMemory(0, read));
             have += read;
+            Interlocked.Add(ref _bytesDone, read);
+
+            var wait = _throttle.Take(read);
+            if (wait > 0) await Task.Delay(wait);
 
             if ((DateTime.UtcNow - lastShown).TotalMilliseconds > 250)
             {
                 lastShown = DateTime.UtcNow;
-                var doneNow = doneBefore + have;
-                Bar.Value = (double)doneNow / totalBytes * 100;
-                var secs = (DateTime.UtcNow - started).TotalSeconds;
-                var speed = secs > 1 ? doneNow / secs : 0;
-                DetailText.Text = speed > 0
-                    ? $"{f.path} — {Gb(doneNow)} из {Gb(totalBytes)}, {speed / 1048576:0.#} МБ/с, осталось {Remaining(totalBytes - doneNow, speed)}"
-                    : f.path;
+                ShowProgress(f.path, totalBytes, started);
             }
         }
         return have;
@@ -955,13 +1534,31 @@ public partial class MainWindow : Window
             return;
         }
 
+        if (_mode == Mode.Elevate)
+        {
+            Elevate();
+            return;
+        }
+
         if (_root is null)
         {
             Browse_Click(sender, e);
             return;
         }
 
+        // В игру с недокачанным клиентом пускать нельзя. Человек попадёт в мир
+        // со старыми таблицами, увидит «вы не можете войти» или чужие названия
+        // предметов и решит, что сломан сервер. Поэтому сначала догоняем.
+        if (_pending > 0)
+        {
+            Say("Клиент ещё не обновлён — играть рано.",
+                $"Осталось скачать {Gb(_pending)}. Догоняю прямо сейчас.");
+            await Sync();
+            return;
+        }
+
         FixRealmlist();
+        VideoFix.Apply(_root);
         ClearWdbCache();
         try
         {
@@ -970,7 +1567,15 @@ public partial class MainWindow : Window
                 WorkingDirectory = _root,
                 UseShellExecute = true,
             });
-            Close();
+            // Раньше здесь стоял Close(), и лаунчер уходил вместе с окном.
+            // Теперь он прячется и остаётся сторожить просьбы из игры —
+            // «открой страницу товара». Показать её может только он: в
+            // клиенте 3.3.5 браузера нет вовсе, а LaunchURL доступна лишь на
+            // экране входа. Для игрока ничего не меняется: окно исчезает, как
+            // и раньше, а сам лаунчер уходит вместе с игрой.
+            Hide();
+            ShopWatch.Start(() => _root, GameRunning);
+            WatchGameExit();
         }
         catch (Exception ex)
         {
@@ -1064,7 +1669,7 @@ public partial class MainWindow : Window
         catch { }
     }
 
-    private static string Gb(long bytes) => bytes >= 1073741824
+    internal static string Gb(long bytes) => bytes >= 1073741824
         ? $"{bytes / 1073741824.0:0.##} ГБ"
         : $"{bytes / 1048576.0:0.#} МБ";
 

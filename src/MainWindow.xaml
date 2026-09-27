@@ -100,7 +100,65 @@
                 <TextBlock x:Name="PathHint" Text="" FontSize="11" Margin="2,7,0,0"
                            Foreground="{StaticResource TextMuted}" TextWrapping="Wrap"/>
 
-                <CheckBox x:Name="AutoStartBox" Margin="0,20,0,0"
+                <!-- Главное правило, видимое всегда. Стоит у поля пути, потому
+                     что ошибаются именно здесь: указывают клиент другого
+                     сервера, и наши таблицы рас поверх чужих моделей дают
+                     невидимых персонажей (форум t/64). Если человек всё же
+                     оставил чужую папку как есть, плашка краснеет и говорит,
+                     как это исправить. -->
+                <Border x:Name="ClientNoteBox" Margin="0,12,0,0" Padding="10,6,8,7"
+                        BorderThickness="2,0,0,0" BorderBrush="#99E6C36A" Background="#14E6C36A">
+                    <TextBlock FontSize="11.5" TextWrapping="Wrap" Foreground="#D6CDB8">
+                        <Run x:Name="ClientNoteHead" FontWeight="SemiBold" Foreground="{StaticResource Gold}"
+                             Text="Играть можно только нашим клиентом."/>
+                        <Run x:Name="ClientNoteBody"
+                             Text="Пустую папку лаунчер заполнит сам, чистый 3.3.5a доведёт до нашего. Клиент другого сервера не указывай: поверх него персонажи становятся невидимыми."/>
+                    </TextBlock>
+                </Border>
+
+                <!-- Ряд служебных кнопок: проверить обновления, пересчитать
+                     файлы игры, показать настройки загрузки. -->
+                <StackPanel Orientation="Horizontal" Margin="0,14,0,0">
+                    <Button x:Name="RefreshBtn" Content="ОБНОВЛЕНИЯ"
+                            Style="{StaticResource SmallButton}" Click="Refresh_Click"/>
+                    <Button x:Name="VerifyBtn" Content="ПРОВЕРИТЬ ФАЙЛЫ"
+                            Style="{StaticResource SmallButton}" Margin="8,0,0,0"
+                            Click="Verify_Click"/>
+                    <Button x:Name="OptionsBtn" Content="НАСТРОЙКИ"
+                            Style="{StaticResource SmallButton}" Margin="8,0,0,0"
+                            Click="Options_Click"/>
+                </StackPanel>
+
+                <StackPanel x:Name="OptionsPanel" Visibility="Collapsed" Margin="0,14,0,0">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="0" Text="Скорость, МБ/с" FontSize="12"
+                                   VerticalAlignment="Center"
+                                   Foreground="{StaticResource TextMuted}"/>
+                        <TextBox x:Name="SpeedBox" Grid.Column="1" Width="62" Margin="10,0,0,0"
+                                 Style="{StaticResource PathInput}"
+                                 LostFocus="Speed_Changed" KeyDown="Speed_Key"/>
+                        <TextBlock Grid.Column="2" Text="Потоков" FontSize="12" Margin="22,0,0,0"
+                                   VerticalAlignment="Center"
+                                   Foreground="{StaticResource TextMuted}"/>
+                        <ComboBox x:Name="ParallelBox" Grid.Column="3" Width="58" Margin="10,0,0,0"
+                                  SelectionChanged="Parallel_Changed"/>
+                    </Grid>
+                    <CheckBox x:Name="StockBox" Margin="0,12,0,0"
+                              Style="{StaticResource GoldCheck}"
+                              Content="Сверять и стоковые файлы Blizzard"
+                              Click="Stock_Click"/>
+                    <TextBlock Text="Ноль в скорости — без ограничения. Стоковые архивы у готовой игры сверять незачем: они не меняются."
+                               FontSize="11" Margin="0,8,0,0" TextWrapping="Wrap"
+                               Foreground="{StaticResource TextMuted}"/>
+                </StackPanel>
+
+                <CheckBox x:Name="AutoStartBox" Margin="0,18,0,0"
                           Style="{StaticResource GoldCheck}"
                           Content="Запускать вместе с Windows"
                           Click="AutoStart_Click"/>
