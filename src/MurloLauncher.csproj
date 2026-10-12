@@ -16,9 +16,15 @@
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
     <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
     <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- В инвариантном режиме .NET 8+ по умолчанию не даёт создать никакую
+         культуру, кроме инвариантной, а WPF при отрисовке числа в списке
+         («Потоков» в настройках) просит en-US — и лаунчер падал по кнопке
+         «Настройки» (владелец 12.10). Так культуры создаются (с инвариантными
+         данными), а разбор чисел и дат остаётся прежним. -->
+    <PredefinedCulturesOnly>false</PredefinedCulturesOnly>
     <SatelliteResourceLanguages>ru</SatelliteResourceLanguages>
 
-    <Version>1.5.1</Version>
+    <Version>1.5.2</Version>
     <Product>MurloVille</Product>
     <Company>MurloVille</Company>
     <AssemblyTitle>Лаунчер MurloVille</AssemblyTitle>
