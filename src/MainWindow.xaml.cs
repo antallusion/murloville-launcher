@@ -103,6 +103,27 @@ public partial class MainWindow : Window
         string? baseUrl, long totalBytes, List<Entry>? files,
         List<string>? ours);
 
+    /// <summary>
+    /// Один путь — одна запись. Windows не различает регистр и косые, и две
+    /// записи вроде «Interface/AddOns/X.toc» и «interface\addons\x.toc» — это
+    /// один файл на диске: две параллельные загрузки в него мешали бы друг
+    /// другу («файл занят другим процессом»). Оставляем первую запись.
+    /// </summary>
+    private static Manifest? Normalize(Manifest? m)
+    {
+        if (m?.files is null) return m;
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var files = new List<Entry>(m.files.Count);
+        foreach (var f in m.files)
+        {
+            if (string.IsNullOrWhiteSpace(f.path)) continue;
+            var path = f.path.Replace('\\', '/').TrimStart('/');
+            if (path.Split('/').Any(p => p == ".." || p == ".")) continue;   // за пределы папки игры не пишем
+            if (seen.Add(path)) files.Add(f with { path = path });
+        }
+        return m with { files = files };
+    }
+
     // --- запуск --------------------------------------------------------------
 
     private async Task Startup()
@@ -123,7 +144,7 @@ public partial class MainWindow : Window
         {
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
             var json = await Http.GetStringAsync($"{Base}/manifest.json", cts.Token);
-            _manifest = JsonSerializer.Deserialize<Manifest>(json);
+            _manifest = Normalize(JsonSerializer.Deserialize<Manifest>(json));
         }
         catch (Exception ex)
         {
@@ -782,6 +803,7 @@ public partial class MainWindow : Window
 
             var started = DateTime.UtcNow;
             var failed = new System.Collections.Concurrent.ConcurrentBag<string>();
+            var locked = new System.Collections.Concurrent.ConcurrentBag<string>();
 
             // Несколько файлов разом: один поток редко забирает всю полосу, а
             // на установке в семнадцать гигабайт это разница между часом и
@@ -804,6 +826,7 @@ public partial class MainWindow : Window
                     // это единственный занятый MPQ, а не общая беда. А вот
                     // запущенная игра — беда общая, и дальше идти незачем.
                     failed.Add($"{f.path}: {Short(ex.Message)}");
+                    if (IsLocked(ex)) locked.Add(f.path);
                     if (GameRunning()) Volatile.Write(ref stop, true);
                 }
                 finally
@@ -829,14 +852,33 @@ public partial class MainWindow : Window
                     PlayBtn.Content = "ОТ АДМИНИСТРАТОРА";
                     PlayBtn.IsEnabled = true;
                 }
+                else if (!locked.IsEmpty && _lockedRetries < MaxLockedRetries)
+                {
+                    // Файл держит не игра, а кто-то ещё: антивирус, проводник,
+                    // второе окно лаунчера. Обычно это на секунды — говорим,
+                    // какой именно файл, и пробуем сами, не дожидаясь кнопки.
+                    _lockedRetries++;
+                    var name = locked.First();
+                    var more = locked.Count > 1 ? $" и ещё {locked.Count - 1}" : "";
+                    OfferRetry($"Файл занят другой программой: {Path.GetFileName(name)}{more}.",
+                        $"{name.Replace('/', '\\')} сейчас открыт в другой программе. Закрой игру, второе окно "
+                        + $"лаунчера и редактор, если файл в нём открыт. Повторю сам через {LockedRetrySeconds} с "
+                        + $"(попытка {_lockedRetries} из {MaxLockedRetries}) — или нажми «Повторить».");
+                    ScheduleAutoRetry();
+                }
                 else
                 {
-                    OfferRetry("Часть файлов не обновилась.", failed.First() + tail);
+                    OfferRetry(locked.IsEmpty ? "Часть файлов не обновилась." : "Файл так и остался занят.",
+                        locked.IsEmpty
+                            ? failed.First() + tail
+                            : $"{locked.First().Replace('/', '\\')} держит другая программа. Перезагрузи компьютер "
+                              + "и нажми «Повторить» — после перезагрузки файл точно освободится.");
                 }
                 return false;
             }
 
             _pending = 0;
+            _lockedRetries = 0;
             Say(big ? "Игра установлена." : "Обновление установлено.",
                 $"Файлов: {todo.Count}, {Gb(bytes)}");
             Bar.Value = 100;
@@ -917,7 +959,7 @@ public partial class MainWindow : Window
         {
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
             var json = await Http.GetStringAsync($"{Base}/manifest.json?t={DateTime.UtcNow.Ticks}", cts.Token);
-            _manifest = JsonSerializer.Deserialize<Manifest>(json);
+            _manifest = Normalize(JsonSerializer.Deserialize<Manifest>(json));
         }
         catch (Exception ex)
         {
@@ -940,6 +982,28 @@ public partial class MainWindow : Window
         _forceVerify = true;
         try { await Sync(); }
         finally { _forceVerify = false; }
+    }
+
+    /// <summary>Сколько раз подряд уже повторяли сами из-за занятого файла.</summary>
+    private int _lockedRetries;
+    private const int MaxLockedRetries = 3;
+    private const int LockedRetrySeconds = 15;
+    private System.Windows.Threading.DispatcherTimer? _autoRetry;
+
+    /// <summary>Повтор сам по себе через несколько секунд — если человек не нажмёт раньше.</summary>
+    private void ScheduleAutoRetry()
+    {
+        _autoRetry?.Stop();
+        var timer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(LockedRetrySeconds) };
+        timer.Tick += async (_, _) =>
+        {
+            timer.Stop();
+            if (_autoRetry != timer) return;
+            _autoRetry = null;
+            if (_mode == Mode.Retry && !_busy) await Sync();
+        };
+        _autoRetry = timer;
+        timer.Start();
     }
 
     private void OfferRetry(string status, string detail)
@@ -1308,8 +1372,13 @@ public partial class MainWindow : Window
     private const int Attempts = 4;
 
     /// <summary>Адрес файла: прямая ссылка на хранилище S3, запасной путь — игровой сервер.</summary>
-    private Task<string> ResolveUrl(Entry f, CancellationToken token)
+    private Task<string> ResolveUrl(Entry f, CancellationToken token, bool fromServer = false)
     {
+        // Запасной путь после несовпавшего отпечатка: в хранилище мог остаться
+        // старый файл того же размера, а на игровом сервере лежит свежий.
+        if (fromServer)
+            return Task.FromResult($"{Base}/files/{EncodePath(f.path)}");
+
         // Прямой адрес из манифеста — главный путь: с 2026-09-06 весь клиент
         // лежит в одном хранилище S3, ссылки постоянные и с докачкой.
         if (!string.IsNullOrEmpty(f.url))
@@ -1349,44 +1418,83 @@ public partial class MainWindow : Window
     /// было бы издевательством. Обрыв или застывший поток — берём свежую
     /// ссылку и продолжаем с того же места, до четырёх попыток на файл.
     /// </summary>
+    /// <summary>
+    /// Один файл на диске — одна загрузка за раз. Манифест уже без повторов
+    /// (Normalize), но замок по пути на диске страхует от любого второго пути
+    /// к тому же файлу: две загрузки в один .part — это «файл занят».
+    /// </summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, SemaphoreSlim> _pathLocks =
+        new(StringComparer.OrdinalIgnoreCase);
+
     private async Task Download(Entry f, long totalBytes, DateTime started)
+    {
+        var gate = _pathLocks.GetOrAdd(Path.GetFullPath(Local(f)), _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync();
+        try
+        {
+            await DownloadLocked(f, totalBytes, started);
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    private async Task DownloadLocked(Entry f, long totalBytes, DateTime started)
     {
         var local = Local(f);
         Directory.CreateDirectory(Path.GetDirectoryName(local)!);
         var part = local + ".part";
 
-        long have = File.Exists(part) ? new FileInfo(part).Length : 0;
-        if (have > f.size) { File.Delete(part); have = 0; }
-
-        for (var attempt = 1; have < f.size; attempt++)
+        // 23.10.2026: в хранилище остался старый MurloBots.toc того же размера,
+        // что и новый. Отпечаток не сошёлся, и вместо внятной ошибки игрок
+        // видел «файл занят другим процессом» — .part удаляли, не закрыв поток
+        // проверки. Теперь поток закрывается до удаления, а несовпавший файл
+        // перекачивается один раз с игрового сервера.
+        var fromServer = false;
+        while (true)
         {
-            try
-            {
-                have = await Pull(f, part, have, totalBytes, started);
-            }
-            catch (Exception ex) when (attempt < Attempts && IsTransient(ex))
-            {
-                DetailText.Text = $"{f.path} — обрыв связи, пробую снова ({attempt} из {Attempts - 1})";
-                await Task.Delay(1500 * attempt);
-                have = File.Exists(part) ? new FileInfo(part).Length : 0;
-            }
-        }
+            long have = File.Exists(part) ? new FileInfo(part).Length : 0;
+            if (have > f.size) { await DeleteWithRetry(part); have = 0; }
+            var pulled = false;
 
-        if (have < f.size)
-            throw new IOException("файл не докачался");
-
-        if (!string.IsNullOrEmpty(f.sha256))
-        {
-            DetailText.Text = $"{f.path} — проверяю";
-            await using (var s = File.OpenRead(part))
+            for (var attempt = 1; have < f.size; attempt++)
             {
-                var hash = Convert.ToHexString(await SHA256.HashDataAsync(s)).ToLowerInvariant();
-                if (!hash.Equals(f.sha256, StringComparison.OrdinalIgnoreCase))
+                try
                 {
-                    File.Delete(part);
-                    throw new IOException("файл скачался повреждённым");
+                    pulled = true;
+                    have = await Pull(f, part, have, totalBytes, started, fromServer);
+                }
+                catch (Exception ex) when (IsLocked(ex))
+                {
+                    throw new FileLockedException(f.path, ex);
+                }
+                catch (Exception ex) when (attempt < Attempts && IsTransient(ex))
+                {
+                    DetailText.Text = $"{f.path} — обрыв связи, пробую снова ({attempt} из {Attempts - 1})";
+                    await Task.Delay(1500 * attempt);
+                    have = File.Exists(part) ? new FileInfo(part).Length : 0;
                 }
             }
+
+            if (have < f.size)
+                throw new IOException("файл не докачался");
+
+            if (string.IsNullOrEmpty(f.sha256)) break;
+
+            DetailText.Text = $"{f.path} — проверяю";
+            var hash = await Task.Run(() => HashOf(part));
+            if (hash.Equals(f.sha256, StringComparison.OrdinalIgnoreCase)) break;
+
+            await DeleteWithRetry(part);
+            // Целиком старый хвост прошлой загрузки — просто качаем заново
+            // оттуда же. Свежая загрузка не сошлась — источник отдаёт не тот
+            // файл: один раз берём с игрового сервера, дальше честно сдаёмся.
+            if (!pulled) continue;
+            if (fromServer)
+                throw new IOException("файл скачался повреждённым — попробуй через пару минут");
+            fromServer = true;
+            DetailText.Text = $"{f.path} — в хранилище не тот файл, беру с игрового сервера";
         }
 
         // Не наш базовый архив, который человек разрешил заменить: прежний
@@ -1396,7 +1504,56 @@ public partial class MainWindow : Window
         if (_aside.Contains(f.path) && File.Exists(local))
             ClientState.MoveAside(_root!, f.path, "заменён архивом MurloVille");
 
-        ReplaceFile(part, local);
+        await ReplaceFile(part, local, f.path);
+    }
+
+    /// <summary>
+    /// SHA-256 файла. Поток закрывается до выхода — удалять или переносить
+    /// файл можно сразу после. Общий доступ на чтение, запись и удаление:
+    /// антивирус, заглянувший в файл, не должен нам мешать, и мы ему тоже.
+    /// </summary>
+    private static string HashOf(string path)
+    {
+        using var s = new FileStream(path, FileMode.Open, FileAccess.Read,
+                                     FileShare.ReadWrite | FileShare.Delete, 1 << 20);
+        return Convert.ToHexString(SHA256.HashData(s)).ToLowerInvariant();
+    }
+
+    /// <summary>Файл занят другим процессом (ERROR_SHARING_VIOLATION / ERROR_LOCK_VIOLATION).</summary>
+    private static bool IsLocked(Exception? ex)
+    {
+        for (; ex is not null; ex = ex.InnerException)
+        {
+            if (ex is FileLockedException) return true;
+            if (ex is IOException && (ex.HResult & 0xFFFF) is 32 or 33) return true;
+        }
+        return false;
+    }
+
+    /// <summary>Файл держит кто-то другой: игра, антивирус, второй лаунчер.</summary>
+    private sealed class FileLockedException(string path, Exception inner)
+        : IOException($"файл занят другой программой: {path}", inner)
+    {
+        public string FilePath { get; } = path;
+    }
+
+    /// <summary>Пять попыток с растущей паузой: антивирус держит свежий файл обычно меньше секунды.</summary>
+    private static readonly int[] Backoff = { 250, 500, 1000, 2000, 4000 };
+
+    private static async Task DeleteWithRetry(string path)
+    {
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                if (File.Exists(path)) File.Delete(path);
+                return;
+            }
+            catch (Exception ex) when ((ex is IOException or UnauthorizedAccessException) && attempt < Backoff.Length)
+            {
+                await Task.Delay(Backoff[attempt]);
+            }
+        }
     }
 
     /// <summary>
@@ -1423,10 +1580,11 @@ public partial class MainWindow : Window
     }
 
     /// <summary>Одна попытка: с текущего места до конца файла или до обрыва.</summary>
-    private async Task<long> Pull(Entry f, string part, long have, long totalBytes, DateTime started)
+    private async Task<long> Pull(Entry f, string part, long have, long totalBytes, DateTime started,
+                                  bool fromServer = false)
     {
         using var linkCts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-        var req = new HttpRequestMessage(HttpMethod.Get, await ResolveUrl(f, linkCts.Token));
+        using var req = new HttpRequestMessage(HttpMethod.Get, await ResolveUrl(f, linkCts.Token, fromServer));
         if (have > 0) req.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(have, null);
 
         using var headCts = new CancellationTokenSource(TimeSpan.FromSeconds(StallSeconds));
@@ -1483,9 +1641,9 @@ public partial class MainWindow : Window
     /// потом сдаёмся, объяснив причину по-человечески: «Access to the path is
     /// denied» игроку ничего не говорит.
     /// </summary>
-    private static void ReplaceFile(string part, string local)
+    private static async Task ReplaceFile(string part, string local, string rel)
     {
-        for (var attempt = 1; ; attempt++)
+        for (var attempt = 0; ; attempt++)
         {
             try
             {
@@ -1496,18 +1654,22 @@ public partial class MainWindow : Window
                         File.SetAttributes(local, attrs & ~FileAttributes.ReadOnly);
                 }
 
+                // Перенос внутри одной папки — атомарная замена: игра увидит
+                // либо прежний файл, либо новый, но не половину.
                 File.Move(part, local, overwrite: true);
                 return;
             }
             catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
             {
-                if (attempt >= 4)
+                if (attempt >= Backoff.Length)
                 {
-                    throw new IOException(GameRunning()
-                        ? "файл занят игрой — закрой World of Warcraft"
-                        : "не удалось заменить файл, он чем-то занят", ex);
+                    if (GameRunning())
+                        throw new IOException("файл занят игрой — закрой World of Warcraft", ex);
+                    if (IsLocked(ex))
+                        throw new FileLockedException(rel, ex);
+                    throw new IOException("не удалось заменить файл — нет доступа", ex);
                 }
-                Thread.Sleep(400);
+                await Task.Delay(Backoff[attempt]);
             }
         }
     }
@@ -1519,6 +1681,10 @@ public partial class MainWindow : Window
         // «Повторить» после занятых файлов или нехватки места.
         if (_mode == Mode.Retry)
         {
+            // Нажал сам — счётчик автоповторов начинается заново.
+            _autoRetry?.Stop();
+            _autoRetry = null;
+            _lockedRetries = 0;
             await Sync();
             return;
         }

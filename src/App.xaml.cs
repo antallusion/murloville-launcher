@@ -59,10 +59,49 @@ public partial class App : Application
             return;
         }
 
+        // Одно окно лаунчера за раз. Свёрнутый автозапуск и окно, открытое
+        // ярлыком, иначе качали бы одни и те же файлы в одни и те же .part и
+        // мешали друг другу («файл занят другим процессом»). Ждём несколько
+        // секунд: при самообновлении и перезапуске с правами прежний процесс
+        // ещё закрывается.
+        _single = new System.Threading.Mutex(false, @"Local\MurloVille-launcher");
+        _show = new System.Threading.EventWaitHandle(false, System.Threading.EventResetMode.AutoReset,
+                                                     @"Local\MurloVille-launcher-show");
+        bool mine;
+        try { mine = _single.WaitOne(TimeSpan.FromSeconds(10)); }
+        catch (System.Threading.AbandonedMutexException) { mine = true; }
+        if (!mine)
+        {
+            // Уже работает — пусть покажет своё окно (оно могло быть свёрнуто
+            // или спрятано, пока идёт игра), а мы тихо уходим.
+            _show.Set();
+            Shutdown();
+            return;
+        }
+
         var window = new MainWindow(autostart: Has("--autostart"));
         MainWindow = window;
         window.Show();
+
+        var show = _show;
+        new System.Threading.Thread(() =>
+        {
+            while (show.WaitOne())
+            {
+                Dispatcher.BeginInvoke(() =>
+                {
+                    window.Show();
+                    if (window.WindowState == WindowState.Minimized) window.WindowState = WindowState.Normal;
+                    window.Activate();
+                });
+            }
+        }) { IsBackground = true, Name = "show-request" }.Start();
     }
+
+    /// <summary>Держим всё время работы: отпускается вместе с процессом.</summary>
+    private static System.Threading.Mutex? _single;
+    /// <summary>Второй запуск просит первый показать окно.</summary>
+    private static System.Threading.EventWaitHandle? _show;
 
     private static string CrashLog => System.IO.Path.Combine(Setup.DataDir, "crash.log");
 
